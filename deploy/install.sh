@@ -4,6 +4,9 @@
 # Builds, installs the LaunchDaemon + log rotation, and (re)starts the service.
 set -euo pipefail
 
+# Homebrew is not on PATH in a non-interactive SSH session on Apple Silicon.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NODE="$(command -v node)"
 USER_NAME="$(whoami)"
@@ -18,6 +21,9 @@ if [[ ! -f "$DIR/voicebridge.yaml" ]]; then
   echo "NOTE: no voicebridge.yaml — the service will run with defaults." >&2
   echo "  cp $DIR/voicebridge.example.yaml $DIR/voicebridge.yaml  # then edit" >&2
 fi
+
+chmod 600 "$DIR/.env"
+[[ ! -f "$DIR/voicebridge.yaml" ]] || chmod 600 "$DIR/voicebridge.yaml"
 
 cd "$DIR"
 npm ci

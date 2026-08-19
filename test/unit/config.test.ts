@@ -41,7 +41,50 @@ describe('loadConfig', () => {
     expect(cfg.policy.matching.minConfidence).toBe(0.8);
     expect(cfg.policy.matching.maxCollectiveTargets).toBe(10);
     expect(cfg.policy.areaAliases['down here']).toEqual(['Living Room', 'Kitchen']);
-    expect(cfg.satellites['sat-kitchen']).toBe('Kitchen');
+    expect(cfg.satellites['sat-kitchen']).toEqual({
+      area: 'Kitchen',
+      host: undefined,
+      port: 6053,
+      haEntryId: undefined,
+      encryptionKeyEnv: undefined,
+      encryptionKey: undefined,
+    });
+  });
+
+  it('loads live satellite connection settings without putting the key in yaml', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'vb-'));
+    writeFileSync(
+      join(cwd, 'voicebridge.yaml'),
+      [
+        'satellites:',
+        '  satellite1-aabbcc:',
+        '    area: Kitchen',
+        '    host: 192.168.107.42',
+        '    port: 6053',
+        '    ha_entry_id: 01SATELLITE',
+        '    encryption_key_env: SATELLITE1_ENCRYPTION_KEY',
+      ].join('\n'),
+    );
+
+    const cfg = loadConfig({ ...BASE_ENV, SATELLITE1_ENCRYPTION_KEY: 'secret-from-env' }, cwd);
+    expect(cfg.satellites['satellite1-aabbcc']).toEqual({
+      area: 'Kitchen',
+      host: '192.168.107.42',
+      port: 6053,
+      haEntryId: '01SATELLITE',
+      encryptionKeyEnv: 'SATELLITE1_ENCRYPTION_KEY',
+      encryptionKey: 'secret-from-env',
+    });
+  });
+
+  it('allows a live satellite without an area until placement is assigned', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'vb-'));
+    writeFileSync(
+      join(cwd, 'voicebridge.yaml'),
+      ['satellites:', '  satellite1-aabbcc:', '    host: 192.168.20.135', '    ha_entry_id: 01SATELLITE'].join('\n'),
+    );
+
+    expect(loadConfig(BASE_ENV, cwd).satellites['satellite1-aabbcc']?.area).toBeUndefined();
   });
 
   it('env model overrides yaml model', () => {

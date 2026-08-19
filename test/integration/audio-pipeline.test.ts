@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { AudioSource } from '../../src/audio/source.js';
 import { WavAudioSource } from '../../src/audio/wav-source.js';
 import { loadConfig } from '../../src/config.js';
 import { HAClient } from '../../src/ha/client.js';
@@ -100,13 +101,22 @@ describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => 
     const dir = mkdtempSync(join(tmpdir(), 'vb-wav-'));
     const wav = join(dir, 'cmd.wav');
     writeSineWav(wav, 1.5);
-    const source = new WavAudioSource(wav, { ffmpegPath: FFMPEG, pace: false, trailingSilenceMs: 400 });
+    const wavSource = new WavAudioSource(wav, { ffmpegPath: FFMPEG, pace: false, trailingSilenceMs: 400 });
+    let speechStarted = 0;
+    const source: AudioSource = {
+      id: wavSource.id,
+      kind: wavSource.kind,
+      frames: () => wavSource.frames(),
+      speechStarted: () => { speechStarted++; },
+      stop: () => wavSource.stop(),
+    };
 
     const rec = await runCommand(deps, { kind: 'audio', source });
 
     expect(rec.outcome).toBe('executed');
     expect(rec.source).toBe('wav');
     expect(rec.transcript).toBe('turn off the kitchen lights');
+    expect(speechStarted).toBe(1);
     for (const key of ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'] as const) expect(rec.t[key]).toBeDefined();
     expect(rec.d.speech_to_action).toBeDefined();
 

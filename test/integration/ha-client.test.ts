@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { HAAuthError, HAClient, HAUnavailableError } from '../../src/ha/client.js';
+import { HAAuthError, HAClient, HARequestError, HAUnavailableError } from '../../src/ha/client.js';
 import { executeAction } from '../../src/ha/executor.js';
 import { Registry } from '../../src/ha/registry.js';
 import { Logger } from '../../src/logger.js';
@@ -87,6 +87,20 @@ describe('HAClient + Registry', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(registry.cache?.statesById.get('light.kitchen_ceiling')?.state).toBe('on');
+  });
+
+  it('retrieves a provisioned ESPHome key without logging or persisting it', async () => {
+    const key = Buffer.alloc(32, 7).toString('base64');
+    const { client } = await connected({ esphomeKeys: { 'entry-satellite': key } });
+
+    await expect(client.getESPHomeEncryptionKey('entry-satellite')).resolves.toBe(key);
+  });
+
+  it('rejects missing or malformed ESPHome keys', async () => {
+    const { client } = await connected({ esphomeKeys: { malformed: 'not-a-noise-key' } });
+
+    await expect(client.getESPHomeEncryptionKey('malformed')).rejects.toBeInstanceOf(HARequestError);
+    await expect(client.getESPHomeEncryptionKey('missing')).rejects.toBeInstanceOf(HARequestError);
   });
 });
 

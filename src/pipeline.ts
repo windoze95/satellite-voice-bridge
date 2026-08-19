@@ -44,6 +44,10 @@ export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: 
   const policyCfg = opts.dryRun ? { ...cfg.policy, dryRun: true } : cfg.policy;
 
   const finishRecord = (): CommandRecord => {
+    // Also covers failures before a Realtime session is acquired (HA down,
+    // authentication failure, etc.). Satellite microphones must never be left
+    // streaming merely because the command exited early.
+    source?.stop();
     const rec = trace.finish();
     appendRecord(cfg.telemetry.jsonlPath, rec);
     logger.info('command finished', { cmd_id: rec.cmd_id, outcome: rec.outcome, error: rec.error, d: rec.d as unknown });
@@ -56,7 +60,7 @@ export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: 
     return finishRecord();
   }
 
-  const originArea = source ? cfg.satellites[source.id] : undefined;
+  const originArea = source ? cfg.satellites[source.id]?.area : undefined;
   const instructions = buildInstructions(cache, policyCfg);
 
   let client: RealtimeClient;
@@ -206,6 +210,9 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     const onEvent = (event: ServerEvent): void => {
       if (completed) return;
       switch (event.type) {
+        case 'input_audio_buffer.speech_started':
+          source?.speechStarted?.();
+          return;
         case 'input_audio_buffer.speech_stopped':
           trace.mark('t3');
           source?.stop();

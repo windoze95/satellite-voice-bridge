@@ -13,6 +13,31 @@ const MatchingSchema = z
   })
   .prefault({});
 
+const SatelliteSchema = z.union([
+  // Backwards-compatible placement-only form. It remains useful for WAV/text
+  // testing, but `voicebridge run` needs the object form below to connect.
+  z.string().min(1).transform((area) => ({
+    area,
+    host: undefined,
+    port: 6053,
+    ha_entry_id: undefined,
+    encryption_key_env: undefined,
+  })),
+  z
+    .object({
+      area: z.string().min(1).optional(),
+      host: z.string().min(1),
+      port: z.number().int().min(1).max(65_535).default(6053),
+      // Stock Satellite1 firmware receives a dynamic Noise key from HA. The
+      // bridge fetches it through HA's admin websocket API using this id.
+      ha_entry_id: z.string().min(1).optional(),
+      // Fallback for custom/static ESPHome configurations. The key itself
+      // stays in .env; YAML contains only the environment-variable name.
+      encryption_key_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+    })
+    .strict(),
+]);
+
 const YamlSchema = z
   .object({
     session: z
@@ -38,7 +63,7 @@ const YamlSchema = z
         area_aliases: z.record(z.string(), z.array(z.string())).prefault({}),
       })
       .prefault({}),
-    satellites: z.record(z.string(), z.string()).prefault({}),
+    satellites: z.record(z.string(), SatelliteSchema).prefault({}),
     telemetry: z.object({ jsonl_path: z.string().default('var/commands.jsonl') }).prefault({}),
   })
   .prefault({});
@@ -51,6 +76,16 @@ export interface PolicyConfig {
   areaAliases: Record<string, string[]>;
 }
 
+export interface SatelliteConfig {
+  area: string | undefined;
+  host: string | undefined;
+  port: number;
+  haEntryId: string | undefined;
+  encryptionKeyEnv: string | undefined;
+  /** Resolved from encryptionKeyEnv at load time; never written to logs or telemetry. */
+  encryptionKey: string | undefined;
+}
+
 export interface Config {
   openaiApiKey: string | undefined;
   haUrl: string | undefined;
@@ -61,7 +96,7 @@ export interface Config {
   configFileFound: boolean;
   session: { mode: 'per_utterance' | 'warm'; model: string; transcribeInput: boolean; ackResponse: boolean };
   policy: PolicyConfig;
-  satellites: Record<string, string>;
+  satellites: Record<string, SatelliteConfig>;
   telemetry: { jsonlPath: string };
 }
 
@@ -112,7 +147,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd: string = p
       },
       areaAliases: y.policy.area_aliases,
     },
-    satellites: y.satellites,
+    satellites: Object.fromEntries(
+      Object.entries(y.satellites).map(([id, satellite]) => [
+        id,
+        {
+          area: satellite.area,
+          host: satellite.host,
+          port: satellite.port,
+          haEntryId: satellite.ha_entry_id,
+          encryptionKeyEnv: satellite.encryption_key_env,
+          encryptionKey: satellite.encryption_key_env ? env[satellite.encryption_key_env] || undefined : undefined,
+        } satisfies SatelliteConfig,
+      ]),
+    ),
     telemetry: { jsonlPath: resolve(cwd, y.telemetry.jsonl_path) },
   };
 }

@@ -35,8 +35,18 @@ policy:
   #   "downstairs": [Living Room, Kitchen]
   area_aliases: {}
 
-# Future: satellite id → area name, so the room that heard you scopes the command.
+# Satellite1 ESPHome native-API connections. Home Assistant's config-entry ID
+# lets the bridge fetch the Noise encryption key at runtime without copying the
+# key into YAML. Area is optional until the satellite has a permanent room.
 satellites: {}
+# satellites:
+#   satellite1-aabbcc:
+#     host: 192.168.20.135
+#     port: 6053
+#     ha_entry_id: 01EXAMPLECONFIGENTRYID
+#     area: Kitchen
+# For a custom ESPHome build not managed by HA, point at an environment
+# variable instead: encryption_key_env: SATELLITE1_ENCRYPTION_KEY
 
 telemetry:
   jsonl_path: var/commands.jsonl

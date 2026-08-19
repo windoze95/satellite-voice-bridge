@@ -150,6 +150,24 @@ export class HAClient extends EventEmitter {
     });
   }
 
+  /**
+   * Retrieve the dynamic ESPHome Noise key that Home Assistant provisioned for
+   * a config entry. HA requires an admin token for this websocket command.
+   * Keeping this lookup here means the Satellite key never has to be copied
+   * into voicebridge.yaml or printed during setup.
+   */
+  async getESPHomeEncryptionKey(entryId: string): Promise<string> {
+    const result = await this.request<{ encryption_key?: unknown }>({
+      type: 'esphome/get_encryption_key',
+      entry_id: entryId,
+    });
+    const key = result?.encryption_key;
+    if (typeof key !== 'string' || !isBase64NoiseKey(key)) {
+      throw new HARequestError(`Home Assistant has no valid ESPHome encryption key for config entry ${entryId}`);
+    }
+    return key;
+  }
+
   async subscribe(eventType: string, handler: (event: { event_type: string; data: unknown }) => void): Promise<void> {
     const id = this.nextId++;
     const ws = this.ws;
@@ -310,4 +328,9 @@ export class HAClient extends EventEmitter {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
   }
+}
+
+function isBase64NoiseKey(value: string): boolean {
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+  return Buffer.from(value, 'base64').length === 32;
 }

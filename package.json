@@ -23,6 +23,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "esphome-client": "2.0.0",
     "ws": "^8.18.0",
     "yaml": "^2.5.0",
     "zod": "^4.0.0"

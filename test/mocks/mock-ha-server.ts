@@ -32,6 +32,8 @@ export interface MockHAOptions {
   failServices?: boolean;
   /** These subscribe_events event_types return an error (e.g. non-admin). */
   rejectSubscriptions?: string[];
+  /** Dynamic ESPHome encryption keys keyed by HA config-entry id. */
+  esphomeKeys?: Record<string, string>;
 }
 
 interface Subscriber {
@@ -145,6 +147,15 @@ export class MockHAServer {
       case 'get_states':
         ok(this.registry.states);
         return;
+      case 'esphome/get_encryption_key': {
+        const key = this.opts.esphomeKeys?.[String(msg.entry_id)];
+        if (!key) {
+          fail('not_found', 'mock: ESPHome config entry not found');
+          return;
+        }
+        ok({ encryption_key: key });
+        return;
+      }
       case 'subscribe_events': {
         const eventType = String(msg.event_type);
         if (this.opts.rejectSubscriptions?.includes(eventType)) {

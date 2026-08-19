@@ -11,6 +11,8 @@ export interface AudioSource {
    * or stop() is called (e.g. server VAD detected end of speech).
    */
   frames(): AsyncIterable<Buffer>;
+  /** Notify live sources when Realtime VAD first detects speech. */
+  speechStarted?(): void;
   /** Stop producing frames; must be idempotent. */
   stop(): void;
 }

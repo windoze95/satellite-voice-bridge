@@ -4,7 +4,7 @@ Low-latency voice control for Home Assistant: a [FutureProofHomes Satellite1](ht
 
 ```
 Satellite1 (wake word, mics, XMOS)
-      │ PCM over LAN                       [future — hardware not required]
+      │ PCM16 audio over ESPHome native API
       ▼
 voicebridge (this repo, always-on Mac)
       │ audio ──────────────► OpenAI Realtime (text + function-call output only)
@@ -20,8 +20,8 @@ Home Assistant ──► the actual device
 - ✅ Text path: `voicebridge text "turn on the kitchen lights"` — full loop, real light.
 - ✅ Audio path: `voicebridge say command.wav` — real audio through server VAD.
 - ✅ Policy engine, HA registry-driven house context, latency telemetry, `doctor`.
-- 🔜 Satellite1 audio source over the ESPHome native API (clean seam exists in
-  `src/audio/`; candidate transport: [esphome-client](https://github.com/hjdhjd/esphome-client)).
+- ✅ Satellite1 audio source over the encrypted ESPHome native API, including
+  wake lifecycle, streaming 16→24 kHz resampling, reconnects, and clean shutdown.
 
 ## Quickstart
 
@@ -49,6 +49,29 @@ runtime caches under `var/`) is gitignored too.
   (registry-change subscriptions require admin).
 - **OpenAI key**: use a dedicated project with a monthly budget cap. With no
   audio output, a spoken command costs well under $0.001.
+
+## Satellite1 connection and ownership
+
+Adopt the Satellite1 normally through Home Assistant's ESPHome integration and
+leave that config entry enabled. Configure its host and HA config-entry id in
+`voicebridge.yaml`; the bridge asks HA for the ESPHome Noise key at runtime, so
+the key is never copied into YAML:
+
+```yaml
+satellites:
+  satellite1-aabbcc:
+    host: 192.168.20.135
+    port: 6053
+    ha_entry_id: 01EXAMPLECONFIGENTRYID
+    area: Kitchen # optional; used as the command's default area
+```
+
+ESPHome permits only one Voice Assistant audio subscriber. At cutover, disable
+only the Satellite's `assist_satellite.*` entity in Home Assistant, then reload
+that ESPHome config entry before starting `voicebridge run`. Do not disable or
+delete the ESPHome device: its sensors, controls, firmware updates, and ordinary
+HA connection remain available. Re-enable the Assist Satellite entity whenever
+you want Home Assistant to own the microphone again.
 
 ## How commands are authorized
 
@@ -99,7 +122,9 @@ JSONL and pick.
 See [deploy/](deploy/): a LaunchDaemon plist (`com.lothal.voicebridge`),
 `install.sh` (build + `launchctl bootstrap`), `deploy.sh` (rsync from a dev
 machine, excluding secrets), and a `newsyslog` rotation config. The `.env` is
-copied to the target by hand — never through git.
+copied to the target by hand — never through git. On first deployment, create
+the target directory and place `.env` plus `voicebridge.yaml` there before
+running `deploy.sh`; the installer locks both files to mode `600`.
 
 ## Development
 
