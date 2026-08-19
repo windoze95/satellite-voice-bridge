@@ -167,7 +167,13 @@ export class CommandTrace {
   }
 
   summaryLine(): string {
-    const rec = this.finish();
+    return summaryLine(this.finish());
+  }
+}
+
+/** One-line console summary of a finished command. */
+export function summaryLine(rec: CommandRecord): string {
+  {
     const icon = rec.outcome === 'executed' || rec.outcome === 'dry_run' ? '✔' : rec.outcome === 'no_action' ? '–' : '✖';
     const spoken = rec.transcript ?? rec.utterance ?? '(no utterance)';
     const parts: string[] = [`${icon} ${JSON.stringify(spoken)}`];
