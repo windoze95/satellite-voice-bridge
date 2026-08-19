@@ -1,0 +1,56 @@
+{
+  "areas": [
+    { "area_id": "kitchen", "name": "Kitchen", "aliases": [], "floor_id": "main" },
+    { "area_id": "living_room", "name": "Living Room", "aliases": ["lounge"], "floor_id": "main" },
+    { "area_id": "master_bedroom", "name": "Master Bedroom", "aliases": [], "floor_id": "upstairs" },
+    { "area_id": "office", "name": "Office", "aliases": [], "floor_id": "upstairs" }
+  ],
+  "devices": [
+    { "id": "dev-floor-lamp", "area_id": "living_room", "name": "Floor Lamp", "name_by_user": null },
+    { "id": "dev-tv", "area_id": "living_room", "name": "TV", "name_by_user": null }
+  ],
+  "entities": [
+    { "entity_id": "light.kitchen_ceiling", "area_id": "kitchen", "device_id": null, "name": null, "original_name": "Ceiling", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.kitchen_island", "area_id": "kitchen", "device_id": null, "name": null, "original_name": "Island", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.kitchen_sink", "area_id": "kitchen", "device_id": null, "name": null, "original_name": "Sink", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.living_room_ceiling", "area_id": "living_room", "device_id": null, "name": null, "original_name": "Ceiling", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.living_room_floor_lamp", "area_id": null, "device_id": "dev-floor-lamp", "name": "Floor Lamp", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "fan.living_room", "area_id": "living_room", "device_id": null, "name": "Ceiling Fan", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.master_ceiling", "area_id": "master_bedroom", "device_id": null, "name": null, "original_name": "Ceiling", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.master_yana_lamp", "area_id": "master_bedroom", "device_id": null, "name": "Yana's Lamp", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.master_julian_lamp", "area_id": "master_bedroom", "device_id": null, "name": "Julian's Lamp", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "switch.coffee_maker", "area_id": "kitchen", "device_id": null, "name": "Coffee Maker", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "media_player.living_room_tv", "area_id": null, "device_id": "dev-tv", "name": null, "original_name": "TV", "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "lock.front_door", "area_id": null, "device_id": null, "name": "Front Door", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "cover.garage_door", "area_id": null, "device_id": null, "name": "Garage Door", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "climate.thermostat", "area_id": "living_room", "device_id": null, "name": "Thermostat", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "scene.movie_time", "area_id": null, "device_id": null, "name": "Movie Time", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "script.bedtime", "area_id": null, "device_id": null, "name": "Bedtime", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "alarm_control_panel.home", "area_id": null, "device_id": null, "name": "Home Alarm", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.hallway_debug", "area_id": null, "device_id": null, "name": "Hallway Debug", "original_name": null, "disabled_by": "user", "hidden_by": null, "entity_category": null },
+    { "entity_id": "light.status_indicator", "area_id": null, "device_id": null, "name": "Status Indicator", "original_name": null, "disabled_by": null, "hidden_by": null, "entity_category": "diagnostic" }
+  ],
+  "full_entities": {
+    "light.living_room_floor_lamp": { "aliases": ["the lamp", "lamp"] },
+    "scene.movie_time": { "aliases": ["movie mode"] }
+  },
+  "states": [
+    { "entity_id": "light.kitchen_ceiling", "state": "off", "attributes": { "friendly_name": "Kitchen Ceiling" } },
+    { "entity_id": "light.kitchen_island", "state": "off", "attributes": { "friendly_name": "Kitchen Island" } },
+    { "entity_id": "light.kitchen_sink", "state": "on", "attributes": { "friendly_name": "Kitchen Sink" } },
+    { "entity_id": "light.living_room_ceiling", "state": "off", "attributes": { "friendly_name": "Living Room Ceiling" } },
+    { "entity_id": "light.living_room_floor_lamp", "state": "off", "attributes": { "friendly_name": "Living Room Floor Lamp" } },
+    { "entity_id": "fan.living_room", "state": "off", "attributes": { "friendly_name": "Living Room Ceiling Fan" } },
+    { "entity_id": "light.master_ceiling", "state": "off", "attributes": { "friendly_name": "Master Bedroom Ceiling" } },
+    { "entity_id": "light.master_yana_lamp", "state": "off", "attributes": { "friendly_name": "Yana's Lamp" } },
+    { "entity_id": "light.master_julian_lamp", "state": "off", "attributes": { "friendly_name": "Julian's Lamp" } },
+    { "entity_id": "switch.coffee_maker", "state": "off", "attributes": { "friendly_name": "Coffee Maker" } },
+    { "entity_id": "media_player.living_room_tv", "state": "off", "attributes": { "friendly_name": "Living Room TV" } },
+    { "entity_id": "lock.front_door", "state": "locked", "attributes": { "friendly_name": "Front Door" } },
+    { "entity_id": "cover.garage_door", "state": "closed", "attributes": { "friendly_name": "Garage Door" } },
+    { "entity_id": "climate.thermostat", "state": "heat", "attributes": { "friendly_name": "Thermostat" } },
+    { "entity_id": "scene.movie_time", "state": "unknown", "attributes": { "friendly_name": "Movie Time" } },
+    { "entity_id": "script.bedtime", "state": "off", "attributes": { "friendly_name": "Bedtime" } },
+    { "entity_id": "alarm_control_panel.home", "state": "disarmed", "attributes": { "friendly_name": "Home Alarm" } }
+  ]
+}
