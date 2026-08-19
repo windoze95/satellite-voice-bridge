@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template — install.sh substitutes @@NODE@@ / @@DIR@@ / @@USER@@ and copies
+     the result to /Library/LaunchDaemons. A LaunchDaemon (not Agent) so the
+     bridge survives reboots with nobody logged into the GUI. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lothal.voicebridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@NODE@@</string>
+    <string>@@DIR@@/dist/index.js</string>
+    <string>run</string>
+  </array>
+  <!-- process.loadEnvFile() finds .env relative to the working directory. -->
+  <key>WorkingDirectory</key>
+  <string>@@DIR@@</string>
+  <key>UserName</key>
+  <string>@@USER@@</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- The service exits non-zero on fatal errors and relies on relaunch. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>@@DIR@@/var/log/voicebridge.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@DIR@@/var/log/voicebridge.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- ffmpeg and node live in /opt/homebrew/bin on Apple Silicon. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
