@@ -1,0 +1,16 @@
+# Secrets — never tracked (house law)
+.env
+.env.*
+!.env.example
+
+# Private house layout / runtime state
+voicebridge.yaml
+var/
+
+# Build + deps
+node_modules/
+dist/
+coverage/
+
+# OS noise
+.DS_Store

@@ -1,0 +1,123 @@
+# satellite-voice-bridge
+
+Low-latency voice control for Home Assistant: a [FutureProofHomes Satellite1](https://futureproofhomes.net/) does on-device wake-word detection and streams command audio over the LAN to this bridge, which streams it to the OpenAI Realtime API with **function calling enabled and no audio output** — there is no speaker and no TTS. The model proposes a single `control_device` call, a local policy engine authorizes it, and the bridge executes it against Home Assistant. The response to "turn on the kitchen lights" is the kitchen lights turning on.
+
+```
+Satellite1 (wake word, mics, XMOS)
+      │ PCM over LAN                       [future — hardware not required]
+      ▼
+voicebridge (this repo, always-on Mac)
+      │ audio ──────────────► OpenAI Realtime (text + function-call output only)
+      │ ◄────────── control_device(action, domain, target, area, value)
+      ▼
+policy engine (GREEN/YELLOW/RED, local, deterministic)
+      ▼
+Home Assistant ──► the actual device
+```
+
+## Status
+
+- ✅ Text path: `voicebridge text "turn on the kitchen lights"` — full loop, real light.
+- ✅ Audio path: `voicebridge say command.wav` — real audio through server VAD.
+- ✅ Policy engine, HA registry-driven house context, latency telemetry, `doctor`.
+- 🔜 Satellite1 audio source over the ESPHome native API (clean seam exists in
+  `src/audio/`; candidate transport: [esphome-client](https://github.com/hjdhjd/esphome-client)).
+
+## Quickstart
+
+Requires Node ≥ 22 and (for the audio path) `ffmpeg` on PATH.
+
+```
+git clone https://github.com/windoze95/satellite-voice-bridge.git
+cd satellite-voice-bridge
+npm ci
+cp .env.example .env               # fill in OPENAI_API_KEY, HA_URL, HA_TOKEN
+cp voicebridge.example.yaml voicebridge.yaml
+npm run build
+
+node dist/index.js doctor          # every dependency checked, ✓/✗
+node dist/index.js text "turn on the kitchen lights" --dry-run
+node dist/index.js text "turn on the kitchen lights"
+node dist/index.js say command.wav
+node dist/index.js run             # 24/7 service mode
+```
+
+Secrets live only in `.env` (gitignored). Your house layout (`voicebridge.yaml`,
+runtime caches under `var/`) is gitignored too.
+
+- **HA token**: mint a long-lived access token from an **admin** HA user
+  (registry-change subscriptions require admin).
+- **OpenAI key**: use a dedicated project with a monthly budget cap. With no
+  audio output, a spoken command costs well under $0.001.
+
+## How commands are authorized
+
+The model can only ever propose `control_device(action, domain, target, area, value)`.
+The bridge — not the model — decides what runs:
+
+- **GREEN** (lights, fans, switches, media, scenes, scripts): resolved against
+  the HA registry and executed immediately.
+- **YELLOW** (locks, covers, climate): executed only for entities you listed in
+  `yellow_allow`. Collective commands ("all locks") are never allowed here.
+- **RED** (alarm panel, anything unknown): always refused, always logged.
+
+Target resolution is deterministic: the spoken target/area are matched against
+HA's area, device, and entity registries (names + aliases). Low-confidence or
+ambiguous matches are refused rather than guessed, and the action → HA-service
+mapping is a fixed allowlist, so arbitrary service calls are impossible by
+construction.
+
+## Latency methodology
+
+Every command logs one JSONL record (`var/commands.jsonl`) with timestamps:
+
+| T | Meaning |
+|---|---------|
+| T0 | wake / command start |
+| T1 | Realtime session usable |
+| T2 | first audio chunk sent |
+| T3 | end of speech (server VAD) |
+| T4 | function-call arguments complete |
+| T5 | policy decision |
+| T6 | HA service call sent |
+| T7 | HA acknowledged |
+| T8 | device state change confirmed (causally, via HA context id) |
+
+Headline metric: **speech→action = T8 − T3**. Console per command:
+
+```
+✔ "turn on the kitchen lights" → light.kitchen_ceiling on | speech→action 742 ms (model 418 · policy 1 · ha 89 · confirm 234) | $0.0007
+```
+
+`session_setup = T1 − T0` quantifies the cost of fresh-per-utterance sessions;
+`session.mode: warm` in `voicebridge.yaml` keeps a session open instead
+(auto-recycled before OpenAI's 60-minute session cap). Benchmark both from the
+JSONL and pick.
+
+## Deployment (launchd on an always-on Mac)
+
+See [deploy/](deploy/): a LaunchDaemon plist (`com.lothal.voicebridge`),
+`install.sh` (build + `launchctl bootstrap`), `deploy.sh` (rsync from a dev
+machine, excluding secrets), and a `newsyslog` rotation config. The `.env` is
+copied to the target by hand — never through git.
+
+## Development
+
+```
+npm run typecheck
+npm test          # unit + integration against local mock OpenAI/HA servers;
+                  # no network, no secrets — same as CI
+```
+
+Live end-to-end runs (real model, real house) are deliberately not automated.
+
+## A note on scope
+
+This bridge coexists with a conventional Home Assistant Assist pipeline; it
+adds no HA entities and defines no HA actions. If its commands later become
+part of an action ontology elsewhere (e.g. Lothal's `config/actions.yaml`),
+those entries must be added there deliberately — nothing here does it for you.
+
+## License
+
+MIT

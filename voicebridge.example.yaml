@@ -1,0 +1,42 @@
+# Copy to voicebridge.yaml and adjust. The real voicebridge.yaml is gitignored
+# because it describes your house (area aliases, opt-ins, satellite placement).
+
+session:
+  # per_utterance: open a Realtime session when a command starts (simple, pays
+  #   connection setup on every command).
+  # warm: keep a configured session open so audio can start streaming
+  #   immediately (recycled automatically before the 60-minute session cap).
+  mode: per_utterance
+  model: gpt-realtime-2.1-mini
+  # Ask OpenAI to also transcribe input audio (logged for debugging; small cost).
+  transcribe_input: true
+  # After executing, let the model produce a one-line text acknowledgement
+  # (logged, never spoken — there is no speaker).
+  ack_response: true
+
+policy:
+  # When true, commands resolve and log but nothing is sent to Home Assistant.
+  dry_run: false
+  tiers:
+    green: [light, fan, switch, media_player, scene, script]
+    yellow: [lock, cover, climate]
+    red: [alarm_control_panel]
+  # YELLOW-tier entities that may be controlled, listed explicitly.
+  # Everything not listed is refused. Example: [lock.front_door]
+  yellow_allow: []
+  matching:
+    # Refuse when the best name match scores below this (0..1).
+    min_confidence: 0.6
+    # Refuse collective commands ("all lights") that would touch more targets.
+    max_collective_targets: 10
+  # Spoken area phrases → Home Assistant area names.
+  # Example:
+  #   "down here": [Living Room, Kitchen]
+  #   "downstairs": [Living Room, Kitchen]
+  area_aliases: {}
+
+# Future: satellite id → area name, so the room that heard you scopes the command.
+satellites: {}
+
+telemetry:
+  jsonl_path: var/commands.jsonl
