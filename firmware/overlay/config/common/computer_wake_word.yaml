@@ -1,0 +1,100 @@
+# Adds the "computer" wake word (Tater Totterson microWakeWords V5, vendored in
+# wake_words/) and one switch per wake word so the active set can be changed
+# from Home Assistant without reflashing.
+#
+# ESPHome packages merge lists by concatenation — the model row appends to the
+# stock models and the on_client_connected steps run after the stock ones
+# (micro_wake_word.start included). satellite1.yaml itself relies on the same
+# mechanism for its va_connected_wait_for_ble_and_flasher package.
+
+micro_wake_word:
+  models:
+    - model: common/wake_words/computer.json
+      id: computer
+
+select:
+  - platform: template
+    id: !extend mww_sensitivity_select
+    on_value:
+      # !extend REPLACES the stock on_value automation (it is not a list), so
+      # this lambda must carry the stock okay_nabu/hey_jarvis cutoffs verbatim
+      # (from common/voice_assistant.yaml) plus the computer model's.
+      # Cutoffs are quantized uint8 (value/255); 242 is the computer model's
+      # calibrated default of 0.95 (recall 0.992, 0.0 false accepts/h).
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 (stock)
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 (stock)
+          id(computer).set_probability_cutoff(242);     // 0.95
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 (stock)
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 (stock)
+          id(computer).set_probability_cutoff(230);     // 0.90
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 (stock)
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 (stock)
+          id(computer).set_probability_cutoff(209);     // 0.82
+        }
+
+switch:
+  - platform: template
+    id: wake_word_computer
+    name: "Wake word: Computer"
+    icon: "mdi:account-voice"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - micro_wake_word.enable_model: computer
+    turn_off_action:
+      - micro_wake_word.disable_model: computer
+
+  - platform: template
+    id: wake_word_hey_jarvis
+    name: "Wake word: Hey Jarvis"
+    icon: "mdi:account-voice"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - micro_wake_word.enable_model: hey_jarvis
+    turn_off_action:
+      - micro_wake_word.disable_model: hey_jarvis
+
+  - platform: template
+    id: wake_word_okay_nabu
+    name: "Wake word: Okay Nabu"
+    icon: "mdi:account-voice"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - micro_wake_word.enable_model: okay_nabu
+    turn_off_action:
+      - micro_wake_word.disable_model: okay_nabu
+
+voice_assistant:
+  on_client_connected:
+    # Reconcile model enable state with the switches every time the voice
+    # subscriber (the bridge) connects, regardless of boot restore ordering.
+    - if:
+        condition:
+          switch.is_on: wake_word_computer
+        then:
+          - micro_wake_word.enable_model: computer
+        else:
+          - micro_wake_word.disable_model: computer
+    - if:
+        condition:
+          switch.is_on: wake_word_hey_jarvis
+        then:
+          - micro_wake_word.enable_model: hey_jarvis
+        else:
+          - micro_wake_word.disable_model: hey_jarvis
+    - if:
+        condition:
+          switch.is_on: wake_word_okay_nabu
+        then:
+          - micro_wake_word.enable_model: okay_nabu
+        else:
+          - micro_wake_word.disable_model: okay_nabu

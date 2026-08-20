@@ -78,6 +78,11 @@ delete the ESPHome device: its sensors, controls, firmware updates, and ordinary
 HA connection remain available. Re-enable the Assist Satellite entity whenever
 you want Home Assistant to own the microphone again.
 
+The wake word is chosen on the device, not here — the bridge handles whatever
+utterance follows it. `firmware/` builds stock Satellite1 firmware plus an
+overlay adding the **"computer"** wake word and a Home Assistant switch per
+wake word; see `firmware/README.md`.
+
 ## How commands are authorized
 
 The model can only ever propose `control_device(action, domain, target, area, value, light)`.

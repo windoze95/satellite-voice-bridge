@@ -14,3 +14,6 @@ coverage/
 
 # OS noise
 .DS_Store
+
+# Satellite1 firmware build tree (cloned + generated)
+firmware/.build/

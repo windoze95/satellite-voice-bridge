@@ -1,0 +1,12 @@
+# Satellite1 stock v0.2.0 plus the "computer" wake word.
+# Same construction as the stock ld2410/ld2450 variants: the stock
+# satellite1.yaml is included as a package and extended, never edited.
+# esp32_fw_version pins the reported project version to the stock release so
+# the Home Assistant update entity stays quiet (installing a stock update from
+# it would drop the computer wake word until this overlay is rebuilt).
+substitutions:
+  esp32_fw_version: v0.2.0
+
+packages:
+  base_image: !include satellite1.yaml
+  computer_wake_word: !include common/computer_wake_word.yaml
