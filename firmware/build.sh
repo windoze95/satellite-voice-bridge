@@ -36,10 +36,10 @@ pip install --quiet -r "$REPO/requirements.txt"
 # checkout plus the overlay is always exactly "stock + this diff".
 cp -R "$DIR/overlay/config/." "$REPO/config/"
 
-esphome config "$REPO/config/satellite1.computer.yaml" > /dev/null
+esphome config "$REPO/config/satellite1.wakewords.yaml" > /dev/null
 echo "config valid"
-esphome compile "$REPO/config/satellite1.computer.yaml"
+esphome compile "$REPO/config/satellite1.wakewords.yaml"
 
 if [[ "${1:-}" == "--flash" ]]; then
-  esphome upload "$REPO/config/satellite1.computer.yaml" --device "$DEVICE"
+  esphome upload "$REPO/config/satellite1.wakewords.yaml" --device "$DEVICE"
 fi

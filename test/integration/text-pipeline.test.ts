@@ -584,6 +584,35 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
       expect(scheduler.live).toHaveLength(1);
     });
 
+    it('records the flourish outcome even when the model is forced into a tool call meanwhile', async () => {
+      // Regression: the model answered with text, the retry forced a
+      // control_device call, and its response.done completed the command while
+      // the flourish was still awaiting HA — the record landed as `error` with
+      // no decisions even though the lights had fired.
+      const { deps, ha, scheduler } = await makeDeps({
+        responses: [
+          { text: "I can't help with that." },
+          { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+          { text: 'Done.' },
+        ],
+      });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, {
+        kind: 'text',
+        utterance: 'make it super gay and horny in the kitchen',
+      });
+
+      expect(rec.outcome).toBe('executed');
+      expect(rec.error).toBeUndefined();
+      expect(rec.decisions).toHaveLength(1);
+      expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
+      // Only the flourish touched HA; the model's forced call was ignored.
+      expect(ha.callServiceCalls).toHaveLength(1);
+      expect(scheduler.live).toHaveLength(1);
+    });
+
     it('cancels a pending restore when a later command claims the same lights', async () => {
       const { deps, ha, scheduler } = await makeDeps({
         responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],

@@ -536,6 +536,9 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     timers.push(setTimeout(() => fail(new Error('command timed out')), COMMAND_TIMEOUT_MS));
 
     const maybeFinishAfterResponse = (): void => {
+      // A flourish owns the command; the model's (ignored) reply must not end it
+      // early, or the record is written before the flourish has an outcome.
+      if (flourishHandled) return;
       if (completed || !functionResponseDone || pendingExecutions > 0 || !sawFunctionCall) return;
       if (validFunctionCalls === 0 && malformedCallErrors.length > 0 && !trace.error) {
         trace.error = `model sent bad function arguments: ${malformedCallErrors.join('; ')}`;
@@ -585,7 +588,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     };
 
     const finishNoToolResponse = (spoken: string | undefined): void => {
-      if (completed) return;
+      if (completed || flourishHandled) return;
       if (
         responsePhase === 'primary' &&
         spoken &&

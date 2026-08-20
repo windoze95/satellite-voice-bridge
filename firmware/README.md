@@ -48,7 +48,7 @@ states live in NVS and survive OTA.
 - The HA **update entity still tracks stock releases**. Installing a stock
   update from HA replaces this build — wake word reverts to jarvis/nabu —
   until the overlay is rebuilt on the new tag (bump `TAG` in build.sh and
-  `esp32_fw_version` in `overlay/config/satellite1.computer.yaml`, re-run with
+  `esp32_fw_version` in `overlay/config/satellite1.wakewords.yaml`, re-run with
   `--flash`). The overlay pins the reported project version to the stock
   release version so the update entity stays quiet until a genuinely newer
   stock release exists.
