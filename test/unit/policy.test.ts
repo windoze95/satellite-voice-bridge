@@ -11,6 +11,7 @@ const propose = (p: Partial<ProposedAction>): ProposedAction => ({
   target: 'lights',
   area: 'kitchen',
   value: null,
+  light: null,
   ...p,
 });
 
@@ -67,6 +68,160 @@ describe('decide', () => {
   it('set without a value is refused', () => {
     const d = decide(cache, TEST_POLICY, propose({ action: 'set', target: 'island' }));
     expect(d).toMatchObject({ outcome: 'refuse', reason: 'missing_value' });
+  });
+
+  it('plans structured light data against resolved target capabilities', () => {
+    const capable = buildFixtureCache();
+    for (const entityId of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = capable.statesById.get(entityId);
+      if (!state) throw new Error(`fixture is missing ${entityId}`);
+      state.attributes.supported_color_modes = ['color_temp', 'xy'];
+      state.attributes.supported_features = 32;
+      state.attributes.min_color_temp_kelvin = 2200;
+      state.attributes.max_color_temp_kelvin = 6500;
+    }
+    const d = decide(
+      capable,
+      TEST_POLICY,
+      propose({
+        light: {
+          brightness_pct: 35,
+          rgb_color: [128, 0, 128],
+          color_temp_kelvin: null,
+          effect: null,
+          transition_seconds: 3,
+          flash: null,
+        },
+      }),
+    );
+
+    expect(d).toMatchObject({ outcome: 'execute', entityIds: ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink'] });
+    expect(d.resolved).toMatchObject({
+      service: 'turn_on',
+      serviceData: { brightness_pct: 35, rgb_color: [128, 0, 128], transition: 3 },
+    });
+  });
+
+  it('validates and preserves a model-selected advertised effect', () => {
+    const capable = buildFixtureCache();
+    for (const entityId of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = capable.statesById.get(entityId);
+      if (!state) throw new Error(`fixture is missing ${entityId}`);
+      state.attributes.supported_color_modes = ['xy'];
+      state.attributes.supported_features = 4;
+      state.attributes.effect_list = ['off', 'prism', 'sparkle'];
+    }
+    const d = decide(
+      capable,
+      TEST_POLICY,
+      propose({
+        light: {
+          brightness_pct: null,
+          rgb_color: null,
+          color_temp_kelvin: null,
+          effect: 'sparkle',
+          transition_seconds: null,
+          flash: null,
+        },
+      }),
+    );
+
+    expect(d).toMatchObject({ outcome: 'execute' });
+    expect(d.resolved?.serviceData).toEqual({ effect: 'sparkle' });
+  });
+
+  it('rechecks the collective limit after a light group expands to leaf targets', () => {
+    const grouped = buildFixtureCache();
+    const memberIds = ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink'];
+    const templateEntry = grouped.entitiesById.get(memberIds[0]!);
+    const templateState = grouped.statesById.get(memberIds[0]!);
+    if (!templateEntry || !templateState) throw new Error('fixture is missing a kitchen light');
+    for (const entityId of memberIds) {
+      grouped.entitiesById.delete(entityId);
+      const state = grouped.statesById.get(entityId);
+      if (!state) throw new Error(`fixture is missing ${entityId}`);
+      state.attributes.supported_color_modes = ['xy'];
+    }
+    grouped.entitiesById.set('light.kitchen_group', {
+      ...templateEntry,
+      entity_id: 'light.kitchen_group',
+      name: 'Kitchen group',
+      original_name: 'Kitchen group',
+    });
+    grouped.statesById.set('light.kitchen_group', {
+      ...templateState,
+      entity_id: 'light.kitchen_group',
+      attributes: {
+        ...templateState.attributes,
+        friendly_name: 'Kitchen group',
+        entity_id: memberIds,
+        supported_color_modes: ['xy'],
+      },
+    });
+
+    const d = decide(
+      grouped,
+      { ...TEST_POLICY, matching: { ...TEST_POLICY.matching, maxCollectiveTargets: 2 } },
+      propose({
+        light: {
+          brightness_pct: null,
+          rgb_color: [255, 0, 0],
+          color_temp_kelvin: null,
+          effect: null,
+          transition_seconds: null,
+          flash: null,
+        },
+      }),
+    );
+
+    expect(d).toMatchObject({ outcome: 'refuse', reason: 'too_many_targets' });
+    expect(d.message).toContain('would touch 3 devices (limit 2)');
+  });
+
+  it('deduplicates a registered group and its members before applying the collective limit', () => {
+    const grouped = buildFixtureCache();
+    const memberIds = ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink'];
+    const templateEntry = grouped.entitiesById.get(memberIds[0]!);
+    const templateState = grouped.statesById.get(memberIds[0]!);
+    if (!templateEntry || !templateState) throw new Error('fixture is missing a kitchen light');
+    for (const entityId of memberIds) {
+      const state = grouped.statesById.get(entityId);
+      if (!state) throw new Error(`fixture is missing ${entityId}`);
+      state.attributes.supported_color_modes = ['xy'];
+    }
+    grouped.entitiesById.set('light.kitchen_group', {
+      ...templateEntry,
+      entity_id: 'light.kitchen_group',
+      name: 'Kitchen group',
+      original_name: 'Kitchen group',
+    });
+    grouped.statesById.set('light.kitchen_group', {
+      ...templateState,
+      entity_id: 'light.kitchen_group',
+      attributes: {
+        ...templateState.attributes,
+        friendly_name: 'Kitchen group',
+        entity_id: memberIds,
+        supported_color_modes: ['xy'],
+      },
+    });
+
+    const d = decide(
+      grouped,
+      { ...TEST_POLICY, matching: { ...TEST_POLICY.matching, maxCollectiveTargets: 3 } },
+      propose({
+        light: {
+          brightness_pct: null,
+          rgb_color: [255, 0, 0],
+          color_temp_kelvin: null,
+          effect: null,
+          transition_seconds: null,
+          flash: null,
+        },
+      }),
+    );
+
+    expect(d).toMatchObject({ outcome: 'execute', entityIds: memberIds });
   });
 
   it('resolution failures pass through with their reason', () => {

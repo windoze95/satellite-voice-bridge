@@ -14,6 +14,102 @@ describe('buildHouseMap', () => {
     expect(map).toContain('AREA: Master Bedroom');
   });
 
+  it('advertises compact per-area light capabilities from state attributes', () => {
+    const capableCache = buildFixtureCache();
+    const ceiling = capableCache.statesById.get('light.kitchen_ceiling');
+    const island = capableCache.statesById.get('light.kitchen_island');
+    if (!ceiling || !island) throw new Error('fixture is missing kitchen lights');
+
+    capableCache.statesById.set('light.kitchen_ceiling', {
+      ...ceiling,
+      attributes: {
+        ...ceiling.attributes,
+        supported_color_modes: ['color_temp', 'xy'],
+        min_color_temp_kelvin: 2200,
+        max_color_temp_kelvin: 6500,
+        effect_list: ['sparkle', 'off', 'candle'],
+        supported_features: 44,
+      },
+    });
+    capableCache.statesById.set('light.kitchen_island', {
+      ...island,
+      attributes: {
+        ...island.attributes,
+        supported_color_modes: ['brightness'],
+        effect_list: ['prism', 'candle'],
+        supported_features: 36,
+      },
+    });
+
+    const capableMap = buildHouseMap(capableCache, TEST_POLICY);
+    const kitchen = capableMap.slice(capableMap.indexOf('AREA: Kitchen'), capableMap.indexOf('AREA: Living Room'));
+    expect(kitchen).toContain(
+      'capabilities: light.brightness_pct=0..100; light.rgb_color=[r,g,b]; ' +
+        'light.color_temp_kelvin=2200..6500; light.effect=candle|off|prism|sparkle; ' +
+        'light.flash=short|long; light.transition_seconds=0..6553',
+    );
+    expect(capableMap.slice(capableMap.indexOf('AREA: Living Room'))).not.toContain('capabilities:');
+  });
+
+  it('advertises emulated Kelvin control for color-only lights', () => {
+    const capableCache = buildFixtureCache();
+    const floorLamp = capableCache.statesById.get('light.living_room_floor_lamp');
+    if (!floorLamp) throw new Error('fixture is missing the living-room floor lamp');
+    capableCache.statesById.set('light.living_room_floor_lamp', {
+      ...floorLamp,
+      attributes: { ...floorLamp.attributes, supported_color_modes: ['xy'] },
+    });
+
+    const capableMap = buildHouseMap(capableCache, TEST_POLICY);
+    const livingRoom = capableMap.slice(capableMap.indexOf('AREA: Living Room'), capableMap.indexOf('AREA: Master Bedroom'));
+    expect(livingRoom).toContain('light.rgb_color=[r,g,b]');
+    expect(livingRoom).toContain('light.color_temp_kelvin=2000..6535');
+  });
+
+  it('does not advertise capabilities that exist only on unavailable lights', () => {
+    const capableCache = buildFixtureCache();
+    const ceiling = capableCache.statesById.get('light.kitchen_ceiling');
+    const ceilingEntry = capableCache.entitiesById.get('light.kitchen_ceiling');
+    if (!ceiling || !ceilingEntry) throw new Error('fixture is missing the kitchen ceiling light');
+    capableCache.statesById.set('light.kitchen_ceiling', {
+      ...ceiling,
+      state: 'unavailable',
+      attributes: {
+        ...ceiling.attributes,
+        supported_color_modes: ['xy'],
+        supported_features: 4,
+        effect_list: ['unavailable-only-effect'],
+      },
+    });
+    // HA light groups union member capabilities even when a contributing
+    // member is unavailable. The prompt must aggregate actionable leaf state,
+    // not re-advertise that stale union from the group.
+    capableCache.entitiesById.set('light.kitchen_group', {
+      ...ceilingEntry,
+      entity_id: 'light.kitchen_group',
+      name: 'Kitchen group',
+      original_name: 'Kitchen group',
+    });
+    capableCache.statesById.set('light.kitchen_group', {
+      ...ceiling,
+      entity_id: 'light.kitchen_group',
+      state: 'on',
+      attributes: {
+        ...ceiling.attributes,
+        friendly_name: 'Kitchen group',
+        entity_id: ['light.kitchen_ceiling', 'light.kitchen_island'],
+        supported_color_modes: ['xy'],
+        supported_features: 4,
+        effect_list: ['unavailable-only-effect'],
+      },
+    });
+
+    const capableMap = buildHouseMap(capableCache, TEST_POLICY);
+    const kitchen = capableMap.slice(capableMap.indexOf('AREA: Kitchen'), capableMap.indexOf('AREA: Living Room'));
+    expect(kitchen).toContain('Kitchen Ceiling');
+    expect(kitchen).not.toContain('unavailable-only-effect');
+  });
+
   it('includes aliases inline', () => {
     expect(map).toContain('Living Room Floor Lamp (aka the lamp, lamp)');
   });
@@ -72,6 +168,37 @@ describe('buildInstructions', () => {
     expect(text).toContain('control_device');
     expect(text).toContain('HOUSE:');
     expect(text).not.toContain('heard this command');
+  });
+
+  it('gives compact operational guidance for light appearance controls', () => {
+    const text = buildInstructions(cache, TEST_POLICY);
+
+    expect(text).toContain('Brightness, RGB color, color temperature, or effect imply action "turn_on"');
+    expect(text).toContain('Use this short procedure immediately');
+    expect(text).toContain('Do not deliberate over multiple equally safe appearance choices');
+    expect(text).toContain('Transition and flash preserve an explicit requested "turn_on" or "turn_off" action');
+    expect(text).toContain('light.effect, light.rgb_color, and light.color_temp_kelvin are mutually exclusive');
+    expect(text).toContain('Treat natural lighting moods and styles');
+    expect(text).toContain('"party time", "cozy", or "romantic"');
+    expect(text).toContain(
+      'choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness',
+    );
+    expect(text).toContain('Never put a mood word in light.effect unless that exact effect is advertised');
+    expect(text).toContain('Choosing among multiple suitable safe appearances is your judgment, is NOT ambiguity');
+    expect(text).toContain('red=[255,0,0]');
+    expect(text).toContain('purple=[128,0,255]');
+    expect(text).toContain('convert its conventional sRGB value to light.rgb_color');
+    expect(text).toContain('When the object being turned off is the lights/device, use action "turn_off"');
+    expect(text).toContain('When the object is an effect');
+    expect(text).toContain('action "turn_on" and light.effect="off"');
+    expect(text).toContain(
+      'Use light null unless transition or flash was explicitly requested, in which case include only those requested modifiers',
+    );
+    expect(text).toContain('warm=2700, soft=3000, neutral=4000, cool=5000, daylight=6500');
+    expect(text).toContain('A light percentage is light.brightness_pct');
+    expect(text).toContain('"over/in N seconds" is light.transition_seconds=N');
+    expect(text).toContain('light.flash="short"');
+    expect(text).toContain('"turn off the effect" and "stop the effect" mean light.effect="off"');
   });
 
   it('instructs the model to accept area aliases and treat area lights as a collective', () => {

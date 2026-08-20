@@ -41,6 +41,7 @@ export interface DecisionSummary {
   message: string;
   entityIds: string[];
   service?: string;
+  serviceData?: Record<string, unknown>;
   verified?: boolean;
 }
 

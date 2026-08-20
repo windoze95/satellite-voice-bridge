@@ -12,6 +12,7 @@ const propose = (p: Partial<ProposedAction>): ProposedAction => ({
   target: 'lights',
   area: null,
   value: null,
+  light: null,
   ...p,
 });
 

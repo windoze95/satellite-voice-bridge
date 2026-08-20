@@ -8,7 +8,7 @@ Satellite1 (wake word, mics, XMOS)
       ▼
 voicebridge (this repo, always-on Mac)
       │ audio ──────────────► OpenAI Realtime (text + function-call output only)
-      │ ◄────────── control_device(action, domain, target, area, value)
+      │ ◄────────── control_device(action, domain, target, area, value, light)
       ▼
 policy engine (GREEN/YELLOW/RED, local, deterministic)
       ▼
@@ -22,6 +22,8 @@ Home Assistant ──► the actual device
 - ✅ Policy engine, HA registry-driven house context, latency telemetry, `doctor`.
 - ✅ Satellite1 audio source over the encrypted ESPHome native API, including
   wake lifecycle, streaming 16→24 kHz resampling, reconnects, and clean shutdown.
+- ✅ Capability-aware light control: brightness, RGB color, color temperature,
+  effects, transitions, and flashing, with duplicate groups removed locally.
 
 ## Quickstart
 
@@ -37,6 +39,9 @@ npm run build
 
 node dist/index.js doctor          # every dependency checked, ✓/✗
 node dist/index.js text "turn on the kitchen lights" --dry-run
+node dist/index.js text "party time in the office" --dry-run
+node dist/index.js text "make the office purple at 60 percent" --dry-run
+node dist/index.js text "set the office to warm white over five seconds" --dry-run
 node dist/index.js text "turn on the kitchen lights"
 node dist/index.js say command.wav
 node dist/index.js run             # 24/7 service mode
@@ -75,7 +80,7 @@ you want Home Assistant to own the microphone again.
 
 ## How commands are authorized
 
-The model can only ever propose `control_device(action, domain, target, area, value)`.
+The model can only ever propose `control_device(action, domain, target, area, value, light)`.
 The bridge — not the model — decides what runs:
 
 - **GREEN** (lights, fans, switches, media, scenes, scripts): resolved against
@@ -89,6 +94,16 @@ HA's area, device, and entity registries (names + aliases). Low-confidence or
 ambiguous matches are refused rather than guessed, and the action → HA-service
 mapping is a fixed allowlist, so arbitrary service calls are impossible by
 construction.
+
+Light options are a closed, typed object: brightness percentage, RGB color,
+Kelvin temperature, effect, transition time, and short/long flash. The bridge
+checks those options against the selected lights' live Home Assistant
+capabilities, removes duplicate group/member targets, skips unavailable or
+incompatible bulbs, and validates named effects before making the fixed
+`light.turn_on` or `light.turn_off` call. Open-ended mood requests such as
+`party time` are interpreted by the model using the area's advertised effects
+and color controls; the bridge validates the chosen appearance rather than
+hard-coding a phrase-specific preset or guessing an unrelated scene.
 
 ## Latency methodology
 

@@ -169,6 +169,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           message: decision.message,
           entityIds: decision.entityIds,
           service: decision.resolved?.service,
+          serviceData: decision.resolved?.serviceData,
           verified: undefined as boolean | undefined,
         };
         if (decision.outcome === 'execute' && decision.resolved) {

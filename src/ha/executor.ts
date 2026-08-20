@@ -1,6 +1,7 @@
 // The ONLY place a Home Assistant service call can originate. The action×domain
 // map is a fixed allowlist: arbitrary service execution is impossible by construction.
 import type { CommandTrace } from '../telemetry.js';
+import type { LightOptions } from '../realtime/tools.js';
 import type { HAClient } from './client.js';
 import type { CallServiceResult, StateChangedData } from './types.js';
 
@@ -36,16 +37,81 @@ const unsupported = (domain: string, action: string): ServiceMapping => ({
   message: `"${action}" is not supported for ${domain}`,
 });
 
-/** Pure: (action, domain, value) → HA service + data, or a refusal reason. */
-export function mapService(action: string, domain: string, value: number | string | null): ServiceMapping {
+const invalid = (domain: string, field: string): ServiceMapping => ({
+  ok: false,
+  reason: 'invalid_value',
+  message: `Invalid ${field} for ${domain}`,
+});
+
+function lightData(light: LightOptions | null | undefined): Record<string, unknown> | null {
+  if (!light) return {};
+  if ([light.rgb_color, light.color_temp_kelvin, light.effect].filter((value) => value !== null).length > 1) return null;
+  const data: Record<string, unknown> = {};
+  if (light.brightness_pct !== null) {
+    const brightness = pct(light.brightness_pct);
+    if (brightness === null) return null;
+    data.brightness_pct = brightness;
+  }
+  if (light.rgb_color !== null) {
+    if (
+      light.rgb_color.length !== 3 ||
+      light.rgb_color.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)
+    ) {
+      return null;
+    }
+    data.rgb_color = [...light.rgb_color];
+  }
+  if (light.color_temp_kelvin !== null) {
+    if (!Number.isFinite(light.color_temp_kelvin) || light.color_temp_kelvin < 1) return null;
+    data.color_temp_kelvin = Math.round(light.color_temp_kelvin);
+  }
+  if (light.effect !== null) {
+    const effect = light.effect.trim();
+    if (effect.length === 0) return null;
+    data.effect = effect;
+  }
+  if (light.transition_seconds !== null) {
+    if (!Number.isFinite(light.transition_seconds) || light.transition_seconds < 0 || light.transition_seconds > 6553) return null;
+    data.transition = light.transition_seconds;
+  }
+  if (light.flash !== null) data.flash = light.flash;
+  return data;
+}
+
+/** Pure: (action, domain, legacy value, structured light settings) → an allowlisted HA service call or refusal. */
+export function mapService(
+  action: string,
+  domain: string,
+  value: number | string | null,
+  light: LightOptions | null = null,
+): ServiceMapping {
   const p = pct(value);
+  if (domain !== 'light' && light && Object.values(light).some((setting) => setting !== null)) {
+    return invalid(domain, 'light-only settings');
+  }
   switch (domain) {
-    case 'light':
-      if (action === 'turn_on') return { ok: true, service: 'turn_on', serviceData: p !== null ? { brightness_pct: p } : {}, verification: 'state' };
-      if (action === 'turn_off') return { ok: true, service: 'turn_off', serviceData: {}, verification: 'state' };
-      if (action === 'toggle') return { ok: true, service: 'toggle', serviceData: {}, verification: 'state' };
-      if (action === 'set') return p !== null ? { ok: true, service: 'turn_on', serviceData: { brightness_pct: p }, verification: 'state' } : needsValue(domain, action);
+    case 'light': {
+      const data = lightData(light);
+      if (data === null) return invalid(domain, 'light settings');
+      if (value !== null && Object.keys(data).length > 0) return invalid(domain, 'value/light settings conflict');
+      if (p !== null) data.brightness_pct = p;
+      if (action === 'turn_on') return { ok: true, service: 'turn_on', serviceData: data, verification: 'state' };
+      if (action === 'turn_off') {
+        const offData = Object.fromEntries(Object.entries(data).filter(([key]) => key === 'transition' || key === 'flash'));
+        if (Object.keys(offData).length !== Object.keys(data).length) return invalid(domain, 'turn_off settings');
+        return { ok: true, service: 'turn_off', serviceData: offData, verification: 'state' };
+      }
+      if (action === 'toggle') {
+        if (Object.keys(data).length > 0) return invalid(domain, 'toggle settings');
+        return { ok: true, service: 'toggle', serviceData: {}, verification: 'state' };
+      }
+      if (action === 'set') {
+        return Object.keys(data).length > 0
+          ? { ok: true, service: 'turn_on', serviceData: data, verification: 'state' }
+          : needsValue(domain, action);
+      }
       return unsupported(domain, action);
+    }
     case 'fan':
       if (action === 'turn_on') return { ok: true, service: 'turn_on', serviceData: p !== null ? { percentage: p } : {}, verification: 'state' };
       if (action === 'turn_off') return { ok: true, service: 'turn_off', serviceData: {}, verification: 'state' };

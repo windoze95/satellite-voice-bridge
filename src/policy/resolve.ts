@@ -116,6 +116,7 @@ export function resolveTargets(
   cfg: PolicyConfig,
   proposed: ProposedAction,
   originArea?: string,
+  options: { deferCollectiveLimit?: boolean } = {},
 ): Resolution {
   let candidates = controllable(cache, proposed.domain);
 
@@ -157,7 +158,7 @@ export function resolveTargets(
 
   // Collective commands take everything in scope.
   if (isCollective(proposed.target, proposed.domain)) {
-    if (candidates.length > cfg.matching.maxCollectiveTargets) {
+    if (!options.deferCollectiveLimit && candidates.length > cfg.matching.maxCollectiveTargets) {
       return {
         ok: false,
         reason: 'too_many_targets',

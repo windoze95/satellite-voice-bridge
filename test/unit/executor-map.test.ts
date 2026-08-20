@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { mapService } from '../../src/ha/executor.js';
+import type { LightOptions } from '../../src/realtime/tools.js';
+
+const light = (overrides: Partial<LightOptions>): LightOptions => ({
+  brightness_pct: null,
+  rgb_color: null,
+  color_temp_kelvin: null,
+  effect: null,
+  transition_seconds: null,
+  flash: null,
+  ...overrides,
+});
 
 describe('mapService (fixed action×domain allowlist)', () => {
   it.each([
@@ -27,6 +38,65 @@ describe('mapService (fixed action×domain allowlist)', () => {
   it('clamps percents to 0–100', () => {
     expect(mapService('set', 'light', 250)).toMatchObject({ ok: true, serviceData: { brightness_pct: 100 } });
     expect(mapService('set', 'light', -5)).toMatchObject({ ok: true, serviceData: { brightness_pct: 0 } });
+  });
+
+  it('maps structured light settings only to allowlisted light.turn_on data', () => {
+    expect(
+      mapService(
+        'turn_on',
+        'light',
+        null,
+        light({ brightness_pct: 35, rgb_color: [128, 0, 128], transition_seconds: 3, flash: 'short' }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      service: 'turn_on',
+      serviceData: { brightness_pct: 35, rgb_color: [128, 0, 128], transition: 3, flash: 'short' },
+    });
+    expect(mapService('set', 'light', null, light({ color_temp_kelvin: 2700 }))).toMatchObject({
+      ok: true,
+      service: 'turn_on',
+      serviceData: { color_temp_kelvin: 2700 },
+    });
+    expect(mapService('turn_on', 'light', null, light({ effect: 'sparkle' }))).toMatchObject({
+      ok: true,
+      serviceData: { effect: 'sparkle' },
+    });
+    expect(mapService('turn_on', 'light', null, light({ color_temp_kelvin: 0.4 }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
+  });
+
+  it('allows only transition and flash data on turn_off', () => {
+    expect(mapService('turn_off', 'light', null, light({ transition_seconds: 2, flash: 'long' }))).toMatchObject({
+      ok: true,
+      service: 'turn_off',
+      serviceData: { transition: 2, flash: 'long' },
+    });
+    expect(mapService('turn_off', 'light', null, light({ brightness_pct: 50 }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
+  });
+
+  it('defensively refuses conflicting legacy and structured light values', () => {
+    expect(mapService('turn_on', 'light', 50, light({ transition_seconds: 2 }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
+    expect(mapService('toggle', 'light', null, light({ flash: 'short' }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
+    expect(mapService('turn_on', 'fan', null, light({ brightness_pct: 50 }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
+    expect(mapService('turn_on', 'light', null, light({ rgb_color: [255, 0, 0], effect: 'prism' }))).toMatchObject({
+      ok: false,
+      reason: 'invalid_value',
+    });
   });
 
   it('refuses set without a usable value', () => {

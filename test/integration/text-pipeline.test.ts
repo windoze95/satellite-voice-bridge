@@ -115,6 +115,58 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(ha.callServiceCalls).toHaveLength(0);
   });
 
+  it('passes capability-checked light appearance data through to Home Assistant and telemetry', async () => {
+    const argumentsJson = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'kitchen',
+      value: null,
+      light: {
+        brightness_pct: 35,
+        rgb_color: null,
+        color_temp_kelvin: 2700,
+        effect: null,
+        transition_seconds: 3,
+        flash: null,
+      },
+    });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: argumentsJson }] }, { text: 'Done.' }],
+    });
+    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: {
+          ...state.attributes,
+          supported_color_modes: ['color_temp', 'xy'],
+          min_color_temp_kelvin: 2000,
+          max_color_temp_kelvin: 6500,
+          supported_features: 32,
+        },
+      });
+    }
+
+    const rec = await runCommand(deps, {
+      kind: 'text',
+      utterance: 'make the kitchen warm white at 35 percent over 3 seconds',
+    });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions[0]?.serviceData).toEqual({
+      brightness_pct: 35,
+      color_temp_kelvin: 2700,
+      transition: 3,
+    });
+    expect(ha.callServiceCalls[0]).toMatchObject({
+      domain: 'light',
+      service: 'turn_on',
+      service_data: { brightness_pct: 35, color_temp_kelvin: 2700, transition: 3 },
+    });
+  });
+
   it('executes multiple function calls in one response sequentially', async () => {
     const argsLiving = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'ceiling', area: 'living room' });
     const { deps, ha } = await makeDeps({
