@@ -83,6 +83,22 @@ utterance follows it. `firmware/` builds stock Satellite1 firmware plus an
 overlay adding the **"computer"** wake word and a Home Assistant switch per
 wake word; see `firmware/README.md`.
 
+## Flourishes (the one thing the model never sees)
+
+Everything spoken is model-interpreted except phrases listed under `flourishes:`
+in `voicebridge.yaml`. Those are matched locally against the transcript and get
+a fixed short-lived look — hold one appearance, or walk a palette around the
+room — after which the lights are restored to exactly what they were.
+
+The point is reliability, not shortcutting: the model refuses or moralizes at
+some perfectly harmless wording, and a refusal emits no function call to
+intercept. Matching the transcript sidesteps that, and costs no model round trip
+at all. Targeting still goes through the policy engine below, so a flourish can
+only touch lights an ordinary spoken command could have touched.
+
+State is captured before the flourish lands and restored after; a later command
+on the same lights cancels the pending restore rather than undoing itself.
+
 ## How commands are authorized
 
 The model can only ever propose `control_device(action, domain, target, area, value, light)`.

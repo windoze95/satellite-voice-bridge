@@ -1,11 +1,13 @@
 // Orchestrator: one spoken/typed command through Realtime → policy → HA,
 // with T0–T8 telemetry. Everything meets here.
 import type { AudioSource } from './audio/source.js';
-import type { Config } from './config.js';
+import type { Config, FlourishConfig } from './config.js';
 import { buildInstructions } from './context/house-context.js';
 import type { HAClient } from './ha/client.js';
 import { executeAction } from './ha/executor.js';
+import type { FlourishManager } from './ha/flourish-manager.js';
 import { displayName, type Registry } from './ha/registry.js';
+import { matchFlourish, snapshotLights } from './policy/flourish.js';
 import type { Logger } from './logger.js';
 import type { RealtimeClient } from './realtime/client.js';
 import {
@@ -28,9 +30,13 @@ export interface PipelineDeps {
   haClient: HAClient;
   registry: Registry;
   sessions: SessionManager;
+  flourish: FlourishManager;
 }
 
-export type CommandInput = { kind: 'text'; utterance: string } | { kind: 'audio'; source: AudioSource };
+export type CommandInput =
+  /** originArea lets a typed command stand in for a satellite's room. */
+  | { kind: 'text'; utterance: string; originArea?: string }
+  | { kind: 'audio'; source: AudioSource };
 
 const COMMAND_TIMEOUT_MS = 30_000;
 const NO_SPEECH_GRACE_MS = 5_000;
@@ -311,6 +317,92 @@ function shouldRetryWithRequiredTool(
   return false;
 }
 
+/**
+ * Apply a configured flourish and arm its restore. Targeting still goes through
+ * the normal policy engine, so this can only touch lights a spoken command
+ * could have touched; only the *choice* of appearance is local and fixed.
+ */
+async function executeFlourish(
+  deps: PipelineDeps,
+  trace: CommandTrace,
+  spoken: string,
+  flourish: FlourishConfig,
+  cache: NonNullable<Registry['cache']>,
+  policyCfg: Config['policy'],
+  originArea: string | undefined,
+): Promise<void> {
+  trace.mark('t4');
+  const area = areaForUtterance(spoken, cache, policyCfg, originArea);
+  if (!area) {
+    trace.mark('t5');
+    trace.decisions.push({
+      outcome: 'refuse',
+      tier: 'green',
+      reason: 'no_area_for_flourish',
+      message: 'No area was stated and the device that heard this has no configured room.',
+      entityIds: [],
+    });
+    trace.outcome = 'refused';
+    return;
+  }
+
+  const decision = decide(cache, policyCfg, {
+    action: 'turn_on',
+    domain: 'light',
+    target: 'lights',
+    area,
+    value: null,
+    light: flourish.light,
+  });
+  trace.mark('t5');
+  const summary = {
+    outcome: decision.outcome,
+    tier: decision.tier,
+    reason: decision.reason,
+    message: decision.message,
+    entityIds: decision.entityIds,
+    service: decision.resolved?.service,
+    serviceData: decision.resolved?.serviceData,
+    verified: undefined as boolean | undefined,
+  };
+
+  if (decision.outcome === 'refuse') {
+    trace.decisions.push(summary);
+    trace.outcome = 'refused';
+    return;
+  }
+  if (decision.outcome === 'dry_run' || !decision.resolved) {
+    trace.decisions.push(summary);
+    trace.outcome = 'dry_run';
+    return;
+  }
+
+  // Snapshot before the flourish lands, or we would restore the flourish itself.
+  const entityIds = decision.entityIds;
+  const snapshots = deps.flourish.snapshot(() => snapshotLights(cache, entityIds), entityIds);
+  const result = await executeAction(deps.haClient, decision.resolved, trace);
+  summary.verified = result.verified;
+  trace.decisions.push(summary);
+
+  if (!result.ok) {
+    trace.outcome = 'error';
+    trace.error = result.error ?? 'Home Assistant call failed';
+    return;
+  }
+  trace.outcome = 'executed';
+  if (flourish.rotation) {
+    deps.flourish.startRotation(entityIds, flourish.rotation, snapshots, flourish.durationMs);
+  } else {
+    deps.flourish.scheduleRestore(snapshots, flourish.durationMs);
+  }
+  deps.logger.info('flourish applied', {
+    cmd_id: trace.cmdId,
+    entities: entityIds,
+    rotating: flourish.rotation !== null,
+    restore_in_ms: flourish.durationMs,
+  });
+}
+
 export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: { dryRun?: boolean } = {}): Promise<CommandRecord> {
   const { cfg, logger } = deps;
   const source = input.kind === 'audio' ? input.source : null;
@@ -337,7 +429,20 @@ export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: 
     return finishRecord();
   }
 
-  const originArea = source ? cfg.satellites[source.id]?.area : undefined;
+  const originArea = source ? cfg.satellites[source.id]?.area : input.kind === 'text' ? input.originArea : undefined;
+
+  // A typed flourish needs no interpretation: run it without opening a Realtime
+  // session at all. (Spoken ones still need the session for transcription and
+  // are matched from the transcript inside driveCommand.)
+  if (input.kind === 'text') {
+    const flourish = matchFlourish(input.utterance, cfg.flourishes);
+    if (flourish) {
+      trace.mark('t3');
+      await executeFlourish(deps, trace, input.utterance, flourish, cache, policyCfg, originArea);
+      return finishRecord();
+    }
+  }
+
   const baseInstructions = buildInstructions(cache, policyCfg);
   const instructions = originArea
     ? `${baseInstructions}\n\nThe device that heard this command is in: ${originArea}. When no area is stated, prefer devices there.`
@@ -394,6 +499,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     let correctionRequested = false;
     let correctionArea: string | undefined;
     let waitingForTranscript = false;
+    let flourishHandled = false;
     let validFunctionCalls = 0;
     const malformedCallErrors: string[] = [];
     let currentText = '';
@@ -507,6 +613,19 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       complete();
     };
 
+    // Matched on the transcript, not on a function call: the model refuses some
+    // of these phrases outright, and a refusal emits no call to intercept.
+    const maybeStartFlourish = (spoken: string | undefined): boolean => {
+      if (completed || flourishHandled || !spoken) return false;
+      const flourish = matchFlourish(spoken, deps.cfg.flourishes);
+      if (!flourish) return false;
+      flourishHandled = true;
+      executeFlourish(deps, trace, spoken, flourish, cache, policyCfg, originArea)
+        .then(() => complete())
+        .catch((err: unknown) => fail(err instanceof Error ? err : new Error(String(err))));
+      return true;
+    };
+
     const commandTextForSafety = async (): Promise<string | undefined> => {
       if (input.kind === 'text') return input.utterance;
       if (trace.transcript !== undefined) return trace.transcript;
@@ -520,10 +639,13 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     };
 
     const handleCall = async (event: FunctionCallArgumentsDone): Promise<void> => {
-      if (completed) return;
+      if (completed || flourishHandled) return;
       trace.mark('t4');
       const spoken = await commandTextForSafety();
-      if (completed) return;
+      if (completed || flourishHandled) return;
+      // The transcript can land after the call; this is the flourish's last
+      // chance to take over before the model's proposal is acted on.
+      if (maybeStartFlourish(spoken)) return;
       if (spoken && blocksDeviceAction(spoken)) {
         trace.mark('t5');
         trace.functionCalls.push({ name: event.name, args: event.arguments });
@@ -656,6 +778,9 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           verified: undefined as boolean | undefined,
         };
         if (decision.outcome === 'execute' && decision.resolved) {
+          // This command owns these lights now; a pending flourish restore would
+          // otherwise undo it seconds later.
+          deps.flourish.cancelFor(decision.entityIds);
           const result = await executeAction(deps.haClient, decision.resolved, trace);
           if (completed) return; // command already failed/finished; leave the record alone
           summary.verified = result.verified;
@@ -711,6 +836,10 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           trace.transcript = (event as TranscriptionCompleted).transcript;
           resolveTranscript?.(trace.transcript);
           resolveTranscript = undefined;
+          if (maybeStartFlourish(trace.transcript)) {
+            waitingForTranscript = false;
+            return;
+          }
           if (waitingForTranscript) {
             waitingForTranscript = false;
             finishNoToolResponse(trace.transcript);

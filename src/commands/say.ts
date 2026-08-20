@@ -25,6 +25,9 @@ export async function say(args: string[]): Promise<number> {
     const source = new WavAudioSource(file, { ffmpegPath: app.cfg.ffmpegPath });
     const rec = await runCommand(app, { kind: 'audio', source }, { dryRun });
     console.log(summaryLine(rec));
+    // A flourish arms a restore that outlives the command; exiting here would
+    // strand the lights mid-flourish.
+    await app.flourish.drain();
     return rec.ok ? 0 : 1;
   } finally {
     shutdownApp(app);

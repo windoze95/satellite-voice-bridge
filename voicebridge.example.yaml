@@ -48,5 +48,30 @@ satellites: {}
 # For a custom ESPHome build not managed by HA, point at an environment
 # variable instead: encryption_key_env: SATELLITE1_ENCRYPTION_KEY
 
+# Phrase-triggered light flourishes: a fixed short-lived look, then the lights
+# go back exactly as they were. Matched locally against the transcript, so the
+# model is never consulted — it cannot refuse, moralize, or reinterpret these.
+# Targeting still goes through the policy engine: a flourish only ever touches
+# lights in the stated area (or the satellite's own room), capability-checked.
+# Everything else stays model-interpreted; this is not a general mood table.
+flourishes: []
+# flourishes:
+#   # Hold one look: an advertised effect, an RGB colour, or a colour temperature.
+#   - phrases: ["candlelight"]
+#     effect: candle           # must be advertised by the area's lights
+#     brightness_pct: 40
+#     duration_seconds: 12
+#
+#   # Or walk a palette around the room: each light takes the next colour and the
+#   # assignment steps along every interval, so the rainbow visibly travels.
+#   # Short interval + zero transition reads as flashy; longer + a transition is
+#   # a gentle wash. A bulb's own effect (e.g. "prism") is much subtler than this.
+#   - phrases: ["disco time", "party mode"]
+#     rotate_rgb: [[255, 0, 0], [255, 240, 0], [0, 255, 60], [0, 140, 255], [190, 0, 255]]
+#     rotate_interval_seconds: 0.45
+#     rotate_transition_seconds: 0
+#     brightness_pct: 100
+#     duration_seconds: 5
+
 telemetry:
   jsonl_path: var/commands.jsonl

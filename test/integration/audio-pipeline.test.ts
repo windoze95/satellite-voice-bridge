@@ -7,6 +7,7 @@ import type { AudioSource } from '../../src/audio/source.js';
 import { WavAudioSource } from '../../src/audio/wav-source.js';
 import { loadConfig } from '../../src/config.js';
 import { HAClient } from '../../src/ha/client.js';
+import { FlourishManager } from '../../src/ha/flourish-manager.js';
 import { Registry } from '../../src/ha/registry.js';
 import { Logger } from '../../src/logger.js';
 import { runCommand, type PipelineDeps } from '../../src/pipeline.js';
@@ -63,8 +64,9 @@ async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDe
     await rt.close();
     await ha.close();
   });
+  const flourish = new FlourishManager({ haClient, logger });
   await haClient.start();
-  return { deps: { cfg, logger, haClient, registry, sessions }, ha, rt };
+  return { deps: { cfg, logger, haClient, registry, sessions, flourish }, ha, rt };
 }
 
 describe.skipIf(!hasFfmpeg)('WavAudioSource', () => {

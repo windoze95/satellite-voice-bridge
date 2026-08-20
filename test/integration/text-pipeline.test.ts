@@ -1,9 +1,10 @@
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { HAClient } from '../../src/ha/client.js';
+import { FlourishManager } from '../../src/ha/flourish-manager.js';
 import { Registry } from '../../src/ha/registry.js';
 import { Logger } from '../../src/logger.js';
 import { runCommand, type PipelineDeps } from '../../src/pipeline.js';
@@ -23,7 +24,32 @@ afterEach(async () => {
   cleanups = [];
 });
 
-async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDeps; ha: MockHAServer; rt: MockRealtimeServer; cwd: string }> {
+/** Captures scheduled flourish restores so tests fire them without wall-clock delay. */
+class ManualScheduler {
+  readonly scheduled: Array<{ fn: () => void; delayMs: number; cancelled: boolean }> = [];
+
+  readonly schedule = (fn: () => void, delayMs: number): { cancel: () => void } => {
+    const entry = { fn, delayMs, cancelled: false };
+    this.scheduled.push(entry);
+    return {
+      cancel: () => {
+        entry.cancelled = true;
+      },
+    };
+  };
+
+  get live(): Array<{ fn: () => void; delayMs: number; cancelled: boolean }> {
+    return this.scheduled.filter((entry) => !entry.cancelled);
+  }
+
+  fireAll(): void {
+    for (const entry of this.live) entry.fn();
+  }
+}
+
+async function makeDeps(
+  rtOpts: MockRealtimeOptions,
+): Promise<{ deps: PipelineDeps; ha: MockHAServer; rt: MockRealtimeServer; cwd: string; scheduler: ManualScheduler }> {
   const cwd = mkdtempSync(join(tmpdir(), 'vb-e2e-'));
   const ha = await MockHAServer.start();
   const rt = await MockRealtimeServer.start(rtOpts);
@@ -51,8 +77,10 @@ async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDe
     await rt.close();
     await ha.close();
   });
+  const scheduler = new ManualScheduler();
+  const flourish = new FlourishManager({ haClient, logger, schedule: scheduler.schedule });
   await haClient.start();
-  return { deps: { cfg, logger, haClient, registry, sessions }, ha, rt, cwd };
+  return { deps: { cfg, logger, haClient, registry, sessions, flourish }, ha, rt, cwd, scheduler };
 }
 
 describe('text pipeline (mock OpenAI + mock HA)', () => {
@@ -462,6 +490,140 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'bad_arguments' });
     expect(rec.decisions[1]).toMatchObject({ outcome: 'execute', service: 'turn_on', verified: true });
     expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
+  describe('flourishes', () => {
+    const RAINBOW = {
+      phrases: ['super gay', 'super gay and horny'],
+      durationMs: 12_000,
+      light: {
+        brightness_pct: 100,
+        brightness_step_pct: null,
+        rgb_color: null,
+        color_temp_kelvin: null,
+        effect: 'prism',
+        transition_seconds: null,
+        flash: null,
+      },
+      rotation: null,
+    };
+
+    /** Give the kitchen lights Hue-like effect support and a known current look. */
+    function makeKitchenEffectCapable(deps: PipelineDeps): void {
+      for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+        const state = deps.registry.cache?.statesById.get(id);
+        if (!state) throw new Error(`fixture is missing ${id}`);
+        deps.registry.cache?.statesById.set(id, {
+          ...state,
+          state: 'on',
+          attributes: {
+            ...state.attributes,
+            color_mode: 'color_temp',
+            brightness: 140,
+            color_temp_kelvin: 2700,
+            supported_color_modes: ['color_temp', 'xy'],
+            supported_features: 44,
+            effect_list: ['off', 'candle', 'prism'],
+            effect: 'off',
+          },
+        });
+      }
+    }
+
+    it('runs a typed flourish without opening a Realtime session at all', async () => {
+      const { deps, ha, rt, scheduler } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'make it super gay in the kitchen' });
+
+      expect(rec.outcome).toBe('executed');
+      expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
+      expect(rec.decisions[0]?.serviceData).toEqual({ brightness_pct: 100, effect: 'prism' });
+      expect(ha.callServiceCalls).toHaveLength(1);
+      // No model round trip: no session, no tokens, no cost.
+      expect(rt.sessions).toHaveLength(0);
+      expect(rec.usage.inputTextTokens).toBe(0);
+      expect(scheduler.live[0]?.delayMs).toBe(12_000);
+    });
+
+    it('puts the lights back exactly as they were when the restore fires', async () => {
+      const { deps, ha, scheduler } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      await runCommand(deps, { kind: 'text', utterance: 'make it super gay in the kitchen' });
+      expect(ha.callServiceCalls).toHaveLength(1);
+
+      scheduler.live[0]!.fn();
+      await vi.waitFor(() => expect(ha.callServiceCalls.length).toBeGreaterThanOrEqual(3));
+
+      const restores = ha.callServiceCalls.slice(1);
+      expect(restores[0]).toMatchObject({ domain: 'light', service: 'turn_on', service_data: { effect: 'off' } });
+      expect(restores[1]).toMatchObject({
+        domain: 'light',
+        service: 'turn_on',
+        service_data: { brightness: 140, color_temp_kelvin: 2700 },
+      });
+    });
+
+    it('takes over a spoken command even when the model refuses to call the tool', async () => {
+      const { deps, ha, scheduler } = await makeDeps({
+        responses: [{ text: "I can't help with that." }],
+      });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, {
+        kind: 'text',
+        utterance: 'make it super gay and horny in the kitchen',
+      });
+
+      expect(rec.outcome).toBe('executed');
+      expect(ha.callServiceCalls).toHaveLength(1);
+      expect(scheduler.live).toHaveLength(1);
+    });
+
+    it('cancels a pending restore when a later command claims the same lights', async () => {
+      const { deps, ha, scheduler } = await makeDeps({
+        responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],
+      });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      await runCommand(deps, { kind: 'text', utterance: 'make it super gay in the kitchen' });
+      expect(scheduler.live).toHaveLength(1);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
+
+      expect(rec.outcome).toBe('executed');
+      expect(scheduler.live).toHaveLength(0);
+      expect(ha.callServiceCalls).toHaveLength(2); // flourish + the new command, no restore
+    });
+
+    it('refuses a flourish it cannot pin to an area rather than lighting the whole house', async () => {
+      const { deps, ha } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'make it super gay' });
+
+      expect(rec.outcome).toBe('refused');
+      expect(rec.decisions[0]).toMatchObject({ reason: 'no_area_for_flourish' });
+      expect(ha.callServiceCalls).toHaveLength(0);
+    });
+
+    it('leaves ordinary commands on the model path', async () => {
+      const { deps, rt } = await makeDeps({
+        responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],
+      });
+      deps.cfg.flourishes = [RAINBOW];
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
+
+      expect(rec.outcome).toBe('executed');
+      expect(rt.sessions).toHaveLength(1);
+    });
   });
 
   it('fails cleanly when session.update is rejected', async () => {

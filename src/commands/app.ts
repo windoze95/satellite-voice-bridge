@@ -2,6 +2,7 @@
 import { loadConfig, missingEnv, type Config } from '../config.js';
 import { advertisedDomains, buildInstructions } from '../context/house-context.js';
 import { HAClient } from '../ha/client.js';
+import { FlourishManager } from '../ha/flourish-manager.js';
 import { Registry } from '../ha/registry.js';
 import { Logger, type LogLevel } from '../logger.js';
 import { SessionManager } from '../realtime/session.js';
@@ -12,6 +13,7 @@ export interface App {
   haClient: HAClient;
   registry: Registry;
   sessions: SessionManager;
+  flourish: FlourishManager;
 }
 
 export class AppError extends Error {}
@@ -59,11 +61,14 @@ export async function createApp(opts: { retryHA: boolean; logFile?: boolean }): 
     }
   });
 
+  const flourish = new FlourishManager({ haClient, logger });
+
   await haClient.start();
-  return { cfg, logger, haClient, registry, sessions };
+  return { cfg, logger, haClient, registry, sessions, flourish };
 }
 
 export function shutdownApp(app: App): void {
+  app.flourish.stop();
   app.sessions.close();
   app.haClient.stop();
 }
