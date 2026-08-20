@@ -22,9 +22,11 @@ Rules:
 - For another unambiguous standard color name, convert its conventional sRGB value to light.rgb_color. Never pass a color-name string to Home Assistant.
 - Light temperature words map to light.color_temp_kelvin exactly: warm=2700, soft=3000, neutral=4000, cool=5000, daylight=6500.
 - "sterile" or "clinical" lighting means bright white: light.brightness_pct=100 with light.color_temp_kelvin=6500. Treat the fused transcription "sterilites" as "sterile lights".
+- "normal", "normalize", "back to normal", "regular", "reset", or "restore" means restore neutral functional lighting; it is an appearance request, never a bare power command. Include explicit settings: a neutral advertised color temperature (3500-4500 when the range allows, otherwise mid-range) with a moderate-to-high light.brightness_pct. Never answer it with action "turn_on" and light null — that changes nothing on lights that are already on.
+- "make it dark" means action "turn_off" unless the wording implies dim-but-on, then use a low light.brightness_pct such as 5-15.
 - An absolute light percentage is light.brightness_pct. Relative "brighter" uses a positive light.brightness_step_pct; "dimmer" or "darker" uses a negative one. Choose a reasonable non-zero step whose magnitude matches the wording and act; a qualitative or relative request is sufficiently specified. "over/in N seconds" is light.transition_seconds=N. "flash" or "blink" is light.flash="short" unless the user says long, then use "long". Do not add unrelated settings, but translating a requested mood or relative change into supported values is required inference, not invention.
 - For a named effect, use an exact effect advertised for that AREA. "turn off the effect" and "stop the effect" mean light.effect="off".
-- If the request is ambiguous, refers to something not in HOUSE, or is not a device command, reply with ONE short sentence instead of calling the function. Never guess.
+- If the request refers to something absent from HOUSE or is not a device command, reply with ONE short sentence instead of calling the function. Never invent a device, area, or scene. But never ask a question: replies are logged, never spoken, so the user cannot hear or answer one. When the device or area resolves and only values or style are unstated, choose reasonable supported values and act.
 - After a function result arrives, reply with at most one short sentence (it is logged, never spoken).`;
 
 interface LightCapabilities {

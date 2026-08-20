@@ -214,6 +214,12 @@ describe('buildInstructions', () => {
     expect(text).toContain('"over/in N seconds" is light.transition_seconds=N');
     expect(text).toContain('light.flash="short"');
     expect(text).toContain('"turn off the effect" and "stop the effect" mean light.effect="off"');
+    expect(text).toContain('"normal", "normalize", "back to normal", "regular", "reset", or "restore"');
+    expect(text).toContain('it is an appearance request, never a bare power command');
+    expect(text).toContain('Never answer it with action "turn_on" and light null');
+    expect(text).toContain('"make it dark" means action "turn_off"');
+    expect(text).toContain('But never ask a question: replies are logged, never spoken');
+    expect(text).toContain('choose reasonable supported values and act');
   });
 
   it('instructs the model to accept area aliases and treat area lights as a collective', () => {

@@ -17,7 +17,7 @@ import {
   type TranscriptionCompleted,
 } from './realtime/events.js';
 import type { SessionManager } from './realtime/session.js';
-import { CONTROL_DEVICE_TOOL, parseControlDeviceArgs } from './realtime/tools.js';
+import { CONTROL_DEVICE_TOOL, parseControlDeviceArgs, type LightOptions } from './realtime/tools.js';
 import { decide } from './policy/engine.js';
 import { normalize } from './policy/resolve.js';
 import { appendRecord, CommandTrace, type CommandRecord } from './telemetry.js';
@@ -78,6 +78,52 @@ const IMPLIED_LIGHT_CHANGE_WORDS = new Set([
   'sterilite',
   'sterilites',
   'sterilights',
+]);
+// Words that describe how the lights should LOOK. When one of these is spoken,
+// a light turn_on whose payload carries no visible setting is a model error
+// (it would change nothing on lights that are already on), never a valid answer.
+const APPEARANCE_WORDS = new Set([
+  'blue',
+  'bright',
+  'brighter',
+  'brightest',
+  'color',
+  'colorful',
+  'colour',
+  'colourful',
+  'cool',
+  'cooler',
+  'coolest',
+  'cyan',
+  'dark',
+  'darker',
+  'darkest',
+  'daylight',
+  'default',
+  'dim',
+  'dimmer',
+  'dimmest',
+  'green',
+  'magenta',
+  'neutral',
+  'normal',
+  'normalise',
+  'normalize',
+  'orange',
+  'pink',
+  'purple',
+  'red',
+  'regular',
+  'reset',
+  'restore',
+  'soft',
+  'standard',
+  'usual',
+  'warm',
+  'warmer',
+  'warmest',
+  'white',
+  'yellow',
 ]);
 const DEVICE_WORDS = new Set([
   'blind',
@@ -146,6 +192,25 @@ function blocksDeviceAction(utterance: string): boolean {
 function hasImpliedLightingMood(utterance: string): boolean {
   const words = new Set(normalize(utterance).split(' '));
   return [...IMPLIED_LIGHT_CHANGE_WORDS].some((word) => words.has(word));
+}
+
+function requestsLightAppearance(utterance: string): boolean {
+  if (hasImpliedLightingMood(utterance)) return true;
+  const words = new Set(normalize(utterance).split(' '));
+  return [...APPEARANCE_WORDS].some((word) => words.has(word));
+}
+
+/** No visible setting at all (transition alone cannot satisfy an appearance request). */
+function lightAppearanceEmpty(light: LightOptions | null): boolean {
+  return (
+    !light ||
+    (light.brightness_pct === null &&
+      light.brightness_step_pct === null &&
+      light.rgb_color === null &&
+      light.color_temp_kelvin === null &&
+      light.effect === null &&
+      light.flash === null)
+  );
 }
 
 function hasExplicitOffIntent(utterance: string): boolean {
@@ -369,7 +434,9 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       if (validFunctionCalls === 0 && malformedCallErrors.length > 0 && !trace.error) {
         trace.error = `model sent bad function arguments: ${malformedCallErrors.join('; ')}`;
       }
-      if (correctionWanted && !correctionRequested && correctionArea) {
+      // A correction re-targets ALL area lights; never fire one after another
+      // call in the same response already executed, or it would clobber that work.
+      if (correctionWanted && !correctionRequested && correctionArea && trace.outcome !== 'executed') {
         correctionRequested = true;
         responsePhase = 'correction';
         sawFunctionCall = false;
@@ -383,7 +450,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
               tools: [lightMoodCorrectionTool(correctionArea)],
               instructions:
                 `${instructions}\n\n` +
-                'Correct the previous rejected call. The user described a visual lighting mood, not a named scene or device. Call control_device with domain "light", target "lights", the canonical stated/origin area, and supported appearance settings chosen from HOUSE.',
+                'Correct the previous rejected call. The user asked for a lighting appearance (a mood, style, restoration, or color), not a named scene or a bare power toggle. Call control_device with domain "light", target "lights", the canonical stated/origin area, and explicit supported appearance settings chosen from HOUSE. For "normal"/"normalize"/"regular", choose a neutral advertised color temperature with a moderate-to-high brightness_pct.',
             },
           });
         } catch (err) {
@@ -510,7 +577,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
             message: 'Visual lighting moods must be expressed as light appearance settings, not an arbitrary named scene.',
             entityIds: [],
           });
-          trace.outcome = 'refused';
+          if (trace.outcome !== 'executed') trace.outcome = 'refused';
           client.send({
             type: 'conversation.item.create',
             item: {
@@ -521,6 +588,42 @@ function driveCommand(ctx: DriveContext): Promise<void> {
                 message: correctionWanted
                   ? 'That call treated a visual lighting mood as a named scene. Retry using domain light, target lights, the canonical area, and supported appearance settings from HOUSE.'
                   : 'No action taken: the visual lighting mood did not include a safely resolvable area.',
+                entities: [],
+              }),
+            },
+          });
+          return;
+        }
+        if (
+          spoken &&
+          !correctionRequested &&
+          parsed.action.domain === 'light' &&
+          parsed.action.action === 'turn_on' &&
+          lightAppearanceEmpty(parsed.action.light) &&
+          requestsLightAppearance(spoken) &&
+          !hasExplicitOffIntent(spoken)
+        ) {
+          correctionArea = areaForUtterance(spoken, cache, policyCfg, originArea);
+          correctionWanted = correctionArea !== undefined;
+          trace.mark('t5');
+          trace.decisions.push({
+            outcome: 'refuse',
+            tier: 'green',
+            reason: 'appearance_requires_light_settings',
+            message: 'The utterance asked for a lighting appearance, but the call carried no light settings; a bare turn_on would change nothing.',
+            entityIds: [],
+          });
+          if (trace.outcome !== 'executed') trace.outcome = 'refused';
+          client.send({
+            type: 'conversation.item.create',
+            item: {
+              type: 'function_call_output',
+              call_id: event.call_id,
+              output: JSON.stringify({
+                ok: false,
+                message: correctionWanted
+                  ? 'That turn_on carried no light settings, but the user asked how the lights should look. Retry with explicit supported appearance settings from HOUSE (for "normal"/"normalize": a neutral color temperature with a moderate-to-high brightness_pct).'
+                  : 'No action taken: the lighting appearance request did not include a safely resolvable area.',
                 entities: [],
               }),
             },

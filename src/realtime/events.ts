@@ -15,7 +15,7 @@ export interface TurnDetection {
 
 export interface AudioInputConfig {
   format: { type: 'audio/pcm'; rate: number };
-  transcription?: { model: string } | null;
+  transcription?: { model: string; language?: string } | null;
   turn_detection: TurnDetection | null;
 }
 

@@ -117,13 +117,28 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
   });
 
   it('retries a clear device-change no_action once with tool use required', async () => {
+    const brighter = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'kitchen',
+      light: { brightness_step_pct: 25 },
+    });
     const { deps, ha, rt } = await makeDeps({
       responses: [
         { text: 'I need an exact brightness.' },
-        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+        { functionCalls: [{ arguments: brighter }] },
         { text: 'Done.' },
       ],
     });
+    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: { ...state.attributes, supported_color_modes: ['brightness'] },
+      });
+    }
 
     const rec = await runCommand(deps, { kind: 'text', utterance: 'make the kitchen lights brighter' });
 
@@ -292,6 +307,103 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
       service: 'turn_on',
       service_data: { brightness_pct: 35, color_temp_kelvin: 2700, transition: 3 },
     });
+  });
+
+  it('bounces an appearance request whose turn_on carries no light settings into a forced correction', async () => {
+    const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
+    const corrected = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'Living Room',
+      light: { brightness_pct: 70, color_temp_kelvin: 4000 },
+    });
+    const { deps, ha, rt } = await makeDeps({
+      responses: [
+        { functionCalls: [{ arguments: bare }] },
+        { functionCalls: [{ arguments: corrected }] },
+        { text: 'Done.' },
+      ],
+    });
+    for (const id of ['light.living_room_ceiling', 'light.living_room_floor_lamp']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: {
+          ...state.attributes,
+          supported_color_modes: ['color_temp'],
+          min_color_temp_kelvin: 2000,
+          max_color_temp_kelvin: 6500,
+        },
+      });
+    }
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the living room lights normal' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'appearance_requires_light_settings' });
+    expect(rec.decisions[1]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
+    expect(rec.decisions[1]?.serviceData).toEqual({ brightness_pct: 70, color_temp_kelvin: 4000 });
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(ha.callServiceCalls[0]).toMatchObject({
+      domain: 'light',
+      service: 'turn_on',
+      service_data: { brightness_pct: 70, color_temp_kelvin: 4000 },
+    });
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'response.create' &&
+          (message.response as { instructions?: string } | undefined)?.instructions?.includes('Correct the previous rejected call') &&
+          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["Living Room"]'),
+      ),
+    ).toBe(true);
+  });
+
+  it('executes a plain bare turn_on without any appearance correction', async () => {
+    const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
+    const { deps, ha, rt } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: bare }] }, { text: 'Done.' }],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn the living room lights back on' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions).toHaveLength(1);
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(JSON.stringify(rt.received)).not.toContain('Correct the previous rejected call');
+  });
+
+  it('suppresses the appearance correction when another call in the response already executed', async () => {
+    const good = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'Living Room',
+      light: { brightness_pct: 80 },
+    });
+    const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
+    const { deps, ha, rt } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: good }, { arguments: bare }] }, { text: 'Done.' }],
+    });
+    for (const id of ['light.living_room_ceiling', 'light.living_room_floor_lamp']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: { ...state.attributes, supported_color_modes: ['brightness'] },
+      });
+    }
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the living room lights bright and colorful' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions).toHaveLength(2);
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'execute' });
+    expect(rec.decisions[1]).toMatchObject({ outcome: 'refuse', reason: 'appearance_requires_light_settings' });
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(JSON.stringify(rt.received)).not.toContain('Correct the previous rejected call');
   });
 
   it('executes multiple function calls in one response sequentially', async () => {

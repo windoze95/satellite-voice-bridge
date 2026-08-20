@@ -123,17 +123,36 @@ describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => 
     const session = rt.sessions[0];
     expect(session?.audio?.input.format).toEqual({ type: 'audio/pcm', rate: 24_000 });
     expect(session?.audio?.input.turn_detection).toMatchObject({ type: 'server_vad', silence_duration_ms: 500 });
-    expect(session?.audio?.input.transcription).toEqual({ model: 'gpt-4o-mini-transcribe' });
+    expect(session?.audio?.input.transcription).toEqual({ model: 'gpt-4o-mini-transcribe', language: 'en' });
   });
 
   it('uses a late transcription to recover a clear satellite lighting request', async () => {
-    const args = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Kitchen' });
+    const args = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'Kitchen',
+      light: { brightness_pct: 100, color_temp_kelvin: 6500 },
+    });
     const { deps, ha, rt } = await makeDeps({
       responses: [{ text: 'I did not understand.' }, { functionCalls: [{ arguments: args }] }],
       speechStopAfterBytes: 24_000,
       transcript: 'Sterilites',
       transcriptAfterResponse: true,
     });
+    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: {
+          ...state.attributes,
+          supported_color_modes: ['color_temp'],
+          min_color_temp_kelvin: 2000,
+          max_color_temp_kelvin: 6500,
+        },
+      });
+    }
     deps.cfg.satellites['sat-kitchen'] = {
       area: 'Kitchen',
       host: undefined,

@@ -12,7 +12,9 @@ const DEFAULT_MAX_AGE_MS = 55 * 60 * 1000;
 export function buildSessionConfig(opts: { instructions: string; audio: boolean; transcribe: boolean }): SessionConfig {
   const audioInput: AudioInputConfig = {
     format: { type: 'audio/pcm', rate: AUDIO_SAMPLE_RATE },
-    transcription: opts.transcribe ? { model: 'gpt-4o-mini-transcribe' } : null,
+    // language pins Whisper to English: ambient noise otherwise transcribes as
+    // random non-English text, which also blinds the transcript-based guards.
+    transcription: opts.transcribe ? { model: 'gpt-4o-mini-transcribe', language: 'en' } : null,
     // Defaults are unpublished — set every field explicitly. silence_duration_ms
     // adds directly to speech→action latency; tune from telemetry.
     turn_detection: {
