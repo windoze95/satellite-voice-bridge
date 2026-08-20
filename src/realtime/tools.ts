@@ -194,6 +194,21 @@ export function parseControlDeviceArgs(argumentsJson: string): ParsedArgs {
   } catch {
     return { ok: false, error: 'arguments were not valid JSON' };
   }
+  // A populated `light` object unambiguously identifies the allowlisted light
+  // domain. Realtime occasionally omits the redundant domain field when
+  // emitting several parallel per-light calls; normalize only that safe case.
+  if (
+    raw !== null &&
+    typeof raw === 'object' &&
+    !Array.isArray(raw) &&
+    !('domain' in raw) &&
+    'light' in raw &&
+    raw.light !== null &&
+    typeof raw.light === 'object' &&
+    !Array.isArray(raw.light)
+  ) {
+    raw = { ...raw, domain: 'light' };
+  }
   const parsed = ArgsSchema.safeParse(raw);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };

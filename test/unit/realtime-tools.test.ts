@@ -36,6 +36,22 @@ describe('control_device light settings', () => {
     expect(parsed).toMatchObject({ ok: true, action: { light: { effect: 'sparkle' } } });
   });
 
+  it('infers the light domain when a per-light call safely proves it', () => {
+    const parsed = parseControlDeviceArgs(
+      JSON.stringify({ action: 'turn_on', target: 'Kitchen Ceiling', area: 'Kitchen', light: { rgb_color: [255, 0, 0] } }),
+    );
+    expect(parsed).toMatchObject({
+      ok: true,
+      action: { domain: 'light', target: 'Kitchen Ceiling', light: { rgb_color: [255, 0, 0] } },
+    });
+  });
+
+  it('does not infer a domain without concrete light settings', () => {
+    expect(parseControlDeviceArgs(JSON.stringify({ action: 'turn_on', target: 'Kitchen Ceiling' }))).toMatchObject({
+      ok: false,
+    });
+  });
+
   it('accepts a relative brightness step and refuses absolute/relative conflicts', () => {
     expect(parseControlDeviceArgs(args({ light: { brightness_step_pct: -25 } }))).toMatchObject({
       ok: true,
