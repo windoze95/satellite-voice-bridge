@@ -122,7 +122,7 @@ describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => 
 
     const session = rt.sessions[0];
     expect(session?.audio?.input.format).toEqual({ type: 'audio/pcm', rate: 24_000 });
-    expect(session?.audio?.input.turn_detection?.type).toBe('server_vad');
+    expect(session?.audio?.input.turn_detection).toMatchObject({ type: 'server_vad', silence_duration_ms: 500 });
     expect(session?.audio?.input.transcription).toEqual({ model: 'gpt-4o-mini-transcribe' });
   });
 });

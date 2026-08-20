@@ -30,6 +30,18 @@ AREA: Test Room
   fan: Test Fan
   switch: Test Switch`;
 
+export function environmentCheck(
+  cfg: Pick<Config, 'openaiApiKey' | 'haUrl' | 'haToken'>,
+): { ok: boolean; detail: string } {
+  const missing: string[] = [];
+  if (!cfg.openaiApiKey) missing.push('OPENAI_API_KEY');
+  if (!cfg.haUrl) missing.push('HA_URL');
+  if (!cfg.haToken) missing.push('HA_TOKEN');
+  return missing.length === 0
+    ? { ok: true, detail: `OPENAI_API_KEY=[set], HA_URL=${cfg.haUrl!}, HA_TOKEN=[set]` }
+    : { ok: false, detail: `missing ${missing.join(', ')} — fill them in .env` };
+}
+
 export async function doctor(args: string[]): Promise<number> {
   const printContext = args.includes('--print-context');
   failed = false;
@@ -45,17 +57,8 @@ export async function doctor(args: string[]): Promise<number> {
   }
 
   // 2. env
-  const missing: string[] = [];
-  if (!cfg.openaiApiKey) missing.push('OPENAI_API_KEY');
-  if (!cfg.haUrl) missing.push('HA_URL');
-  if (!cfg.haToken) missing.push('HA_TOKEN');
-  report(
-    missing.length === 0 ? 'ok' : 'fail',
-    'env',
-    missing.length === 0
-      ? `OPENAI_API_KEY=sk-…${cfg.openaiApiKey!.slice(-4)}, HA_URL=${cfg.haUrl!}, HA_TOKEN=…${cfg.haToken!.slice(-4)}`
-      : `missing ${missing.join(', ')} — fill them in .env`,
-  );
+  const env = environmentCheck(cfg);
+  report(env.ok ? 'ok' : 'fail', 'env', env.detail);
 
   // 3. ffmpeg (audio path only)
   {
