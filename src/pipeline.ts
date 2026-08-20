@@ -41,11 +41,14 @@ const CHANGE_WORDS = new Set([
   'brighten',
   'brighter',
   'close',
+  'color',
+  'colour',
   'darken',
   'darker',
   'dim',
   'dimmer',
   'flash',
+  'effect',
   'lock',
   'make',
   'open',
@@ -55,6 +58,7 @@ const CHANGE_WORDS = new Set([
   'start',
   'stop',
   'switch',
+  'temperature',
   'toggle',
   'turn',
   'unlock',
@@ -423,7 +427,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
               tool_choice: 'required',
               instructions:
                 `${instructions}\n\n` +
-                'The user made a clear, harmless smart-home change request. Call control_device now. If the wording describes a lighting mood, control the stated area lights with domain "light" and target "lights"; do not invent or select a scene. Choose supported appearance settings from HOUSE.',
+                'The user made a clear, harmless smart-home change request. Call control_device now. If the user requested different colors or effects for each light, make one call per exact name on the AREA individual-light line and choose a different supported setting for every call. Otherwise, if the wording describes a lighting mood, control the stated area lights with domain "light" and target "lights"; do not invent or select a scene. Choose supported appearance settings from HOUSE.',
             },
           });
         } catch (err) {

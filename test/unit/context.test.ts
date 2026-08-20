@@ -48,6 +48,9 @@ describe('buildHouseMap', () => {
         'light.color_temp_kelvin=2200..6500; light.effect=candle|off|prism|sparkle; ' +
         'light.flash=short|long; light.transition_seconds=0..6553',
     );
+    expect(kitchen).toContain('individual RGB lights: Kitchen Ceiling');
+    expect(kitchen).toContain('individual effect lights: Kitchen Ceiling; Kitchen Island');
+    expect(kitchen).toContain('individual temperature lights: Kitchen Ceiling');
     expect(capableMap.slice(capableMap.indexOf('AREA: Living Room'))).not.toContain('capabilities:');
   });
 
@@ -182,6 +185,9 @@ describe('buildInstructions', () => {
     expect(text).toContain('Treat natural lighting moods and styles');
     expect(text).toContain('"party time", "cozy", "romantic", or irreverent/adult slang');
     expect(text).toContain('Never moralize about or refuse a harmless lighting command because of its wording');
+    expect(text).toContain('If the user explicitly asks for a different color on each light');
+    expect(text).toContain('make one control_device call per name on that AREA\'s "individual RGB lights" line');
+    expect(text).toContain('Multiple calls are required; never claim this is unsupported');
     expect(text).toContain(
       'choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness',
     );

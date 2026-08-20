@@ -5,16 +5,17 @@ import type { PolicyConfig } from '../config.js';
 import { displayName, effectiveAreaId, type RegistryCache } from '../ha/registry.js';
 import { normalize } from '../policy/resolve.js';
 
-const RULES = `You are the voice-command interpreter for a private smart home. Commands are short and spoken (or typed). Your ONLY job is to translate each command into a single control_device function call, or reply with one short sentence when you cannot.
+const RULES = `You are the voice-command interpreter for a private smart home. Commands are short and spoken (or typed). Your ONLY job is to translate each command into one or more control_device function calls, or reply with one short sentence when you cannot.
 
 Rules:
 - When the user wants a device changed, call control_device. Do not narrate, do not confirm, do not ask a question when a confident call is possible.
-- Use this short procedure immediately: identify action/domain/target/area, translate any requested state or appearance into fields supported by that AREA, then make one call. Do not deliberate over multiple equally safe appearance choices.
+- Use this short procedure immediately: identify action/domain/target/area, translate any requested state or appearance into fields supported by that AREA, then make the required call or calls. Do not deliberate over multiple equally safe appearance choices.
 - Use ONLY area names, area aliases, and device names from HOUSE below. An indented "aliases:" line lists valid spoken aliases for the canonical name on the preceding AREA line. When an alias names one AREA, set area to only that canonical AREA name exactly as written after "AREA:". Never include "aliases:" text or an alias annotation in the area value. If one alias is listed under multiple AREAs, preserve that alias exactly so policy can resolve the configured set. Set area to null only when no area was stated or implied.
 - A command in the form "[area or alias] lights" means all lights in that area: call control_device with target "lights" and the canonical AREA name (or the multi-area alias). Do not select a similarly named device/group or refuse a listed area alias.
 - target is the device/group name as spoken; for whole-group commands use the domain plural (e.g. "lights").
 - Light settings go only in the nested light object. Brightness, RGB color, color temperature, or effect imply action "turn_on". Transition and flash preserve an explicit requested "turn_on" or "turn_off" action. light.effect, light.rgb_color, and light.color_temp_kelvin are mutually exclusive; use only one. light.brightness_pct and light.brightness_step_pct are mutually exclusive. Use value only for non-light percentages or temperatures.
-- Treat natural lighting moods and styles (for example "party time", "cozy", "romantic", or irreverent/adult slang describing a visual mood) as harmless light-control requests, not scene-name lookups or content-generation requests. Infer a suitable appearance and make one call using the stated AREA's advertised capabilities: choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness (and transition/flash only when stated). Choosing among multiple suitable safe appearances is your judgment, is NOT ambiguity, and must not cause a refusal or question. Never moralize about or refuse a harmless lighting command because of its wording. Never put a mood word in light.effect unless that exact effect is advertised, and do not refuse merely because the mood is not a named scene.
+- Treat natural lighting moods and styles (for example "party time", "cozy", "romantic", or irreverent/adult slang describing a visual mood) as harmless light-control requests, not scene-name lookups or content-generation requests. Infer a suitable appearance using the stated AREA's advertised capabilities: choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness (and transition/flash only when stated). Use one group call when every light gets the same appearance. Choosing among multiple suitable safe appearances is your judgment, is NOT ambiguity, and must not cause a refusal or question. Never moralize about or refuse a harmless lighting command because of its wording. Never put a mood word in light.effect unless that exact effect is advertised, and do not refuse merely because the mood is not a named scene.
+- If the user explicitly asks for a different color on each light, make one control_device call per name on that AREA's "individual RGB lights" line. Target each listed light by its exact name, assign a different model-chosen light.rgb_color to every call, and do not use the group target. Likewise, different per-light effects use the "individual effect lights" line. Multiple calls are required; never claim this is unsupported.
 - When the object being turned off is the lights/device, use action "turn_off", including "turn off the party lights". Use light null unless transition or flash was explicitly requested, in which case include only those requested modifiers. When the object is an effect ("turn off/stop the effect"), keep the lights on with action "turn_on" and light.effect="off".
 - A prohibition such as "don't turn on the lights" is not a request to turn them off; make no function call. An informational question such as "should I turn them on?" is also not an action. Polite directives such as "can/could/would you turn them on?" are actions.
 - Named light colors map to light.rgb_color exactly: red=[255,0,0], orange=[255,165,0], yellow=[255,255,0], green=[0,255,0], cyan=[0,255,255], blue=[0,0,255], purple=[128,0,255], pink=[255,105,180], magenta=[255,0,255], white=[255,255,255].
@@ -36,6 +37,12 @@ interface LightCapabilities {
   transition: boolean;
 }
 
+interface IndividualLightCapabilities {
+  rgb: Set<string>;
+  effects: Set<string>;
+  temperature: Set<string>;
+}
+
 const BRIGHTNESS_MODES = new Set(['brightness', 'color_temp', 'hs', 'xy', 'rgb', 'rgbw', 'rgbww', 'white']);
 const COLOR_MODES = new Set(['hs', 'xy', 'rgb', 'rgbw', 'rgbww']);
 const LIGHT_FEATURE_EFFECT = 4;
@@ -54,6 +61,10 @@ function newLightCapabilities(): LightCapabilities {
     flash: false,
     transition: false,
   };
+}
+
+function newIndividualLightCapabilities(): IndividualLightCapabilities {
+  return { rgb: new Set<string>(), effects: new Set<string>(), temperature: new Set<string>() };
 }
 
 function addLightCapabilities(capabilities: LightCapabilities, attributes: Record<string, unknown>): void {
@@ -159,6 +170,7 @@ export function buildHouseMap(cache: RegistryCache, cfg: PolicyConfig): string {
   const domains = advertisedDomains(cfg);
   const byArea = new Map<string | null, Map<string, string[]>>();
   const lightCapabilitiesByArea = new Map<string | null, LightCapabilities>();
+  const individualLightCapabilitiesByArea = new Map<string | null, IndividualLightCapabilities>();
 
   const entityIds = [...cache.entitiesById.keys()].sort();
   for (const entityId of entityIds) {
@@ -176,12 +188,38 @@ export function buildHouseMap(cache: RegistryCache, cfg: PolicyConfig): string {
     areaMap.set(domain, list);
 
     const aliases = entry.aliases ?? [];
-    list.push(displayName(cache, entityId) + (aliases.length > 0 ? ` (aka ${aliases.join(', ')})` : ''));
+    const name = displayName(cache, entityId);
+    list.push(name + (aliases.length > 0 ? ` (aka ${aliases.join(', ')})` : ''));
 
     if (domain === 'light') {
       const capabilities = lightCapabilitiesByArea.get(areaId) ?? newLightCapabilities();
       lightCapabilitiesByArea.set(areaId, capabilities);
       addActionableLightCapabilities(capabilities, cache, entityId);
+
+      const state = cache.statesById.get(entityId);
+      const members = Array.isArray(state?.attributes.entity_id)
+        ? state.attributes.entity_id.filter((member): member is string => typeof member === 'string')
+        : [];
+      if (state && state.state !== 'unavailable' && state.state !== 'unknown' && members.length === 0) {
+        const modes = Array.isArray(state.attributes.supported_color_modes)
+          ? state.attributes.supported_color_modes.filter((mode): mode is string => typeof mode === 'string')
+          : [];
+        const individual = individualLightCapabilitiesByArea.get(areaId) ?? newIndividualLightCapabilities();
+        individualLightCapabilitiesByArea.set(areaId, individual);
+        const supportsColor = modes.some((mode) => COLOR_MODES.has(mode));
+        if (supportsColor) individual.rgb.add(name);
+        if (supportsColor || modes.includes('color_temp')) individual.temperature.add(name);
+        const features = state.attributes.supported_features;
+        if (
+          typeof features === 'number' &&
+          Number.isInteger(features) &&
+          (features & LIGHT_FEATURE_EFFECT) !== 0 &&
+          Array.isArray(state.attributes.effect_list) &&
+          state.attributes.effect_list.some((effect) => typeof effect === 'string' && effect !== 'off')
+        ) {
+          individual.effects.add(name);
+        }
+      }
     }
   }
 
@@ -192,6 +230,7 @@ export function buildHouseMap(cache: RegistryCache, cfg: PolicyConfig): string {
     areaMap: Map<string, string[]> | undefined,
     aliases: string[] = [],
     lightCapabilities?: LightCapabilities,
+    individualLightCapabilities?: IndividualLightCapabilities,
   ): void => {
     if (!areaMap || areaMap.size === 0) return;
     lines.push(`AREA: ${label}`);
@@ -202,6 +241,15 @@ export function buildHouseMap(cache: RegistryCache, cfg: PolicyConfig): string {
       if (domain === 'light') {
         const capabilities = renderLightCapabilities(lightCapabilities);
         if (capabilities) lines.push(`    capabilities: ${capabilities}`);
+        if (individualLightCapabilities && individualLightCapabilities.rgb.size > 0) {
+          lines.push(`    individual RGB lights: ${[...individualLightCapabilities.rgb].sort().join('; ')}`);
+        }
+        if (individualLightCapabilities && individualLightCapabilities.effects.size > 0) {
+          lines.push(`    individual effect lights: ${[...individualLightCapabilities.effects].sort().join('; ')}`);
+        }
+        if (individualLightCapabilities && individualLightCapabilities.temperature.size > 0) {
+          lines.push(`    individual temperature lights: ${[...individualLightCapabilities.temperature].sort().join('; ')}`);
+        }
       }
     }
   };
@@ -212,9 +260,21 @@ export function buildHouseMap(cache: RegistryCache, cfg: PolicyConfig): string {
       )
       .map(([alias]) => alias.trim())
       .sort((a, b) => a.localeCompare(b));
-    renderArea(area.name, byArea.get(area.area_id), aliases, lightCapabilitiesByArea.get(area.area_id));
+    renderArea(
+      area.name,
+      byArea.get(area.area_id),
+      aliases,
+      lightCapabilitiesByArea.get(area.area_id),
+      individualLightCapabilitiesByArea.get(area.area_id),
+    );
   }
-  renderArea('(no area)', byArea.get(null), [], lightCapabilitiesByArea.get(null));
+  renderArea(
+    '(no area)',
+    byArea.get(null),
+    [],
+    lightCapabilitiesByArea.get(null),
+    individualLightCapabilitiesByArea.get(null),
+  );
   return lines.join('\n');
 }
 
