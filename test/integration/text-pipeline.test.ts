@@ -82,6 +82,7 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rt.lastAuth).toBe('Bearer sk-test');
     expect(rt.lastModel).toBe('gpt-realtime-2.1-mini');
     expect(rt.sessions[0]?.output_modalities).toEqual(['text']);
+    expect(rt.sessions[0]?.max_output_tokens).toBe(1200);
     expect(rt.sessions[0]?.audio).toBeUndefined();
     expect(
       rt.received.some(

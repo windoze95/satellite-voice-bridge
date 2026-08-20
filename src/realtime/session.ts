@@ -30,7 +30,9 @@ export function buildSessionConfig(opts: { instructions: string; audio: boolean;
     instructions: opts.instructions,
     tools: [CONTROL_DEVICE_TOOL],
     tool_choice: 'auto',
-    max_output_tokens: 500,
+    // Multiple per-light function calls can exceed 500 tokens even though no
+    // spoken/text answer is needed. Keep enough headroom for a modest room.
+    max_output_tokens: 1200,
     ...(opts.audio ? { audio: { input: audioInput } } : {}),
   };
 }
