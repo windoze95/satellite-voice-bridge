@@ -20,6 +20,7 @@ describe('control_device light settings', () => {
         value: null,
         light: {
           brightness_pct: 35,
+          brightness_step_pct: null,
           rgb_color: [128, 0, 128],
           color_temp_kelvin: null,
           effect: null,
@@ -33,6 +34,18 @@ describe('control_device light settings', () => {
   it('accepts a model-selected named effect', () => {
     const parsed = parseControlDeviceArgs(args({ light: { effect: 'sparkle' } }));
     expect(parsed).toMatchObject({ ok: true, action: { light: { effect: 'sparkle' } } });
+  });
+
+  it('accepts a relative brightness step and refuses absolute/relative conflicts', () => {
+    expect(parseControlDeviceArgs(args({ light: { brightness_step_pct: -25 } }))).toMatchObject({
+      ok: true,
+      action: { light: { brightness_step_pct: -25 } },
+    });
+    const conflict = parseControlDeviceArgs(
+      args({ light: { brightness_pct: 50, brightness_step_pct: 20 } }),
+    );
+    expect(conflict).toMatchObject({ ok: false });
+    if (!conflict.ok) expect(conflict.error).toContain('mutually exclusive');
   });
 
   it('keeps the legacy value-only contract', () => {
@@ -49,6 +62,7 @@ describe('control_device light settings', () => {
     [{ light: { rgb_color: [256, 0, 0] } }, 'Too big'],
     [{ light: { surprise: true } }, 'Invalid input'],
     [{ light: { color_temp_kelvin: 0.4 } }, 'at least 1'],
+    [{ light: { brightness_step_pct: 0 } }, 'magnitude at least 1'],
   ])('refuses invalid settings: %o', (overrides, message) => {
     const parsed = parseControlDeviceArgs(args(overrides));
     expect(parsed).toMatchObject({ ok: false });

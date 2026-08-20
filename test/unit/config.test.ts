@@ -13,6 +13,7 @@ describe('loadConfig', () => {
     expect(cfg.configFileFound).toBe(false);
     expect(cfg.session.mode).toBe('per_utterance');
     expect(cfg.session.model).toBe(DEFAULT_MODEL);
+    expect(cfg.session.ackResponse).toBe(false);
     expect(cfg.policy.tiers.green).toContain('light');
     expect(cfg.policy.tiers.red).toContain('alarm_control_panel');
     expect(cfg.policy.matching.minConfidence).toBe(0.6);

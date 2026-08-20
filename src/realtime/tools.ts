@@ -38,6 +38,7 @@ export type ControlDomain = (typeof CONTROL_DOMAINS)[number];
 
 export interface LightOptions {
   brightness_pct: number | null;
+  brightness_step_pct: number | null;
   rgb_color: [number, number, number] | null;
   color_temp_kelvin: number | null;
   effect: string | null;
@@ -63,7 +64,7 @@ export const CONTROL_DEVICE_TOOL = {
     'target is the device/group name as spoken (for whole-group commands use the domain plural, e.g. "lights"); ' +
     'area is a room/area name exactly as listed in HOUSE, or null when none was stated or implied; ' +
     'value is for non-light percentages or temperatures; put every light setting in light; ' +
-    'light contains optional light-only settings. Use rgb_color for both named and explicit RGB colors.',
+    'light contains optional light-only settings. Use rgb_color for both named and explicit RGB colors; use brightness_step_pct for relative brighter/dimmer requests.',
   parameters: {
     type: 'object',
     properties: {
@@ -80,6 +81,12 @@ export const CONTROL_DEVICE_TOOL = {
         description: 'Light-only settings, or null. Color, color temperature, and effect are mutually exclusive.',
         properties: {
           brightness_pct: { type: ['number', 'null'], minimum: 0, maximum: 100 },
+          brightness_step_pct: {
+            type: ['number', 'null'],
+            minimum: -100,
+            maximum: 100,
+            description: 'Relative brightness change: positive is brighter, negative is dimmer. Must be non-zero.',
+          },
           rgb_color: {
             type: ['array', 'null'],
             items: { type: 'integer', minimum: 0, maximum: 255 },
@@ -106,6 +113,10 @@ const NullableNumber = z.union([z.number().finite(), z.null()]);
 const LightOptionsSchema = z
   .object({
     brightness_pct: NullableNumber.refine((v) => v === null || (v >= 0 && v <= 100), 'must be between 0 and 100').default(null),
+    brightness_step_pct: NullableNumber.refine(
+      (v) => v === null || (v >= -100 && v <= 100 && Math.abs(v) >= 1),
+      'must be between -100 and 100 and have magnitude at least 1',
+    ).default(null),
     rgb_color: z
       .union([z.tuple([z.number().int().min(0).max(255), z.number().int().min(0).max(255), z.number().int().min(0).max(255)]), z.null()])
       .default(null),
@@ -137,6 +148,13 @@ const ArgsSchema = z
     if (populated && args.value !== null) {
       ctx.addIssue({ code: 'custom', path: ['value'], message: 'value cannot be combined with light settings' });
     }
+    if (light.brightness_pct !== null && light.brightness_step_pct !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['light'],
+        message: 'brightness_pct and brightness_step_pct are mutually exclusive',
+      });
+    }
 
     const modes = [light.rgb_color, light.color_temp_kelvin, light.effect].filter((value) => value !== null);
     if (modes.length > 1) {
@@ -152,7 +170,11 @@ const ArgsSchema = z
     }
     if (
       args.action === 'turn_off' &&
-      (light.brightness_pct !== null || light.rgb_color !== null || light.color_temp_kelvin !== null || light.effect !== null)
+      (light.brightness_pct !== null ||
+        light.brightness_step_pct !== null ||
+        light.rgb_color !== null ||
+        light.color_temp_kelvin !== null ||
+        light.effect !== null)
     ) {
       ctx.addIssue({
         code: 'custom',

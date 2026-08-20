@@ -46,11 +46,17 @@ const invalid = (domain: string, field: string): ServiceMapping => ({
 function lightData(light: LightOptions | null | undefined): Record<string, unknown> | null {
   if (!light) return {};
   if ([light.rgb_color, light.color_temp_kelvin, light.effect].filter((value) => value !== null).length > 1) return null;
+  if (light.brightness_pct !== null && light.brightness_step_pct !== null) return null;
   const data: Record<string, unknown> = {};
   if (light.brightness_pct !== null) {
     const brightness = pct(light.brightness_pct);
     if (brightness === null) return null;
     data.brightness_pct = brightness;
+  }
+  if (light.brightness_step_pct !== null) {
+    const step = Math.round(light.brightness_step_pct);
+    if (!Number.isFinite(light.brightness_step_pct) || step === 0 || step < -100 || step > 100) return null;
+    data.brightness_step_pct = step;
   }
   if (light.rgb_color !== null) {
     if (

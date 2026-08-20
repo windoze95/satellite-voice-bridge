@@ -10,9 +10,9 @@ session:
   model: gpt-realtime-2.1-mini
   # Ask OpenAI to also transcribe input audio (logged for debugging; small cost).
   transcribe_input: true
-  # After executing, let the model produce a one-line text acknowledgement
-  # (logged, never spoken — there is no speaker).
-  ack_response: true
+  # Optional logged acknowledgement after execution. Keep false for a
+  # speakerless satellite so a second model response cannot delay the next wake.
+  ack_response: false
 
 policy:
   # When true, commands resolve and log but nothing is sent to Home Assistant.

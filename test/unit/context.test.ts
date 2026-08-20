@@ -44,7 +44,7 @@ describe('buildHouseMap', () => {
     const capableMap = buildHouseMap(capableCache, TEST_POLICY);
     const kitchen = capableMap.slice(capableMap.indexOf('AREA: Kitchen'), capableMap.indexOf('AREA: Living Room'));
     expect(kitchen).toContain(
-      'capabilities: light.brightness_pct=0..100; light.rgb_color=[r,g,b]; ' +
+        'capabilities: light.brightness_pct=0..100; light.brightness_step_pct=-100..100(nonzero); light.rgb_color=[r,g,b]; ' +
         'light.color_temp_kelvin=2200..6500; light.effect=candle|off|prism|sparkle; ' +
         'light.flash=short|long; light.transition_seconds=0..6553',
     );
@@ -178,8 +178,10 @@ describe('buildInstructions', () => {
     expect(text).toContain('Do not deliberate over multiple equally safe appearance choices');
     expect(text).toContain('Transition and flash preserve an explicit requested "turn_on" or "turn_off" action');
     expect(text).toContain('light.effect, light.rgb_color, and light.color_temp_kelvin are mutually exclusive');
+    expect(text).toContain('light.brightness_pct and light.brightness_step_pct are mutually exclusive');
     expect(text).toContain('Treat natural lighting moods and styles');
-    expect(text).toContain('"party time", "cozy", or "romantic"');
+    expect(text).toContain('"party time", "cozy", "romantic", or irreverent/adult slang');
+    expect(text).toContain('Never moralize about or refuse a harmless lighting command because of its wording');
     expect(text).toContain(
       'choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness',
     );
@@ -189,13 +191,20 @@ describe('buildInstructions', () => {
     expect(text).toContain('purple=[128,0,255]');
     expect(text).toContain('convert its conventional sRGB value to light.rgb_color');
     expect(text).toContain('When the object being turned off is the lights/device, use action "turn_off"');
+    expect(text).toContain('A prohibition such as "don\'t turn on the lights" is not a request to turn them off');
+    expect(text).toContain('Polite directives such as "can/could/would you turn them on?" are actions');
     expect(text).toContain('When the object is an effect');
     expect(text).toContain('action "turn_on" and light.effect="off"');
     expect(text).toContain(
       'Use light null unless transition or flash was explicitly requested, in which case include only those requested modifiers',
     );
     expect(text).toContain('warm=2700, soft=3000, neutral=4000, cool=5000, daylight=6500');
-    expect(text).toContain('A light percentage is light.brightness_pct');
+    expect(text).toContain('"sterile" or "clinical" lighting means bright white');
+    expect(text).toContain('light.brightness_pct=100 with light.color_temp_kelvin=6500');
+    expect(text).toContain('Treat the fused transcription "sterilites" as "sterile lights"');
+    expect(text).toContain('An absolute light percentage is light.brightness_pct');
+    expect(text).toContain('Relative "brighter" uses a positive light.brightness_step_pct');
+    expect(text).toContain('"dimmer" or "darker" uses a negative one');
     expect(text).toContain('"over/in N seconds" is light.transition_seconds=N');
     expect(text).toContain('light.flash="short"');
     expect(text).toContain('"turn off the effect" and "stop the effect" mean light.effect="off"');

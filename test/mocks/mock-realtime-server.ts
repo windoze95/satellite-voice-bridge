@@ -11,6 +11,7 @@ export interface MockResponseSpec {
   /** Emit this text (as deltas) in the response. */
   text?: string;
   usage?: RawUsage;
+  status?: string;
 }
 
 export interface MockRealtimeOptions {
@@ -20,6 +21,8 @@ export interface MockRealtimeOptions {
   /** Simulated VAD: end speech after this many PCM bytes (default 48000 ≈ 1 s). */
   speechStopAfterBytes?: number;
   transcript?: string;
+  /** Deliver transcription after response.done to model the independent STT stream. */
+  transcriptAfterResponse?: boolean;
   /** Reply to session.update with an error event instead of session.updated. */
   errorOnUpdate?: string;
   /** Kill the socket right after the first function_call_arguments.done. */
@@ -104,12 +107,14 @@ export class MockRealtimeServer {
           this.send(ws, { type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1000 });
           this.send(ws, { type: 'input_audio_buffer.committed', item_id: `item_${++this.itemCounter}` });
           this.send(ws, { type: 'conversation.item.added', item: { type: 'message', role: 'user' } });
-          this.send(ws, {
+          const transcription = {
             type: 'conversation.item.input_audio_transcription.completed',
             transcript: this.opts.transcript ?? 'mock transcript',
-          });
+          };
+          if (!this.opts.transcriptAfterResponse) this.send(ws, transcription);
           // create_response: true semantics — the server starts the response itself.
           this.emitResponse(ws);
+          if (this.opts.transcriptAfterResponse) this.send(ws, transcription);
         }
         return;
       }
@@ -154,7 +159,7 @@ export class MockRealtimeServer {
 
     this.send(ws, {
       type: 'response.done',
-      response: { id: responseId, status: 'completed', output, usage: spec.usage ?? DEFAULT_USAGE },
+      response: { id: responseId, status: spec.status ?? 'completed', output, usage: spec.usage ?? DEFAULT_USAGE },
     });
   }
 }

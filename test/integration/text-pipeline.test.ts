@@ -15,6 +15,7 @@ const logger = new Logger({ level: 'error' });
 
 const ARGS_KITCHEN = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'kitchen' });
 const ARGS_ALARM = JSON.stringify({ action: 'disarm', domain: 'alarm_control_panel', target: 'alarm', area: null });
+const ARGS_MOVIE_SCENE = JSON.stringify({ action: 'activate', domain: 'scene', target: 'movie time', area: null });
 
 let cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -30,6 +31,9 @@ async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDe
     { OPENAI_API_KEY: 'sk-test', HA_URL: ha.url, HA_TOKEN: 'test-token', VOICEBRIDGE_REALTIME_URL: rt.url },
     cwd,
   );
+  // Exercise the optional logged acknowledgement path even though the no-speaker
+  // production default is false.
+  cfg.session.ackResponse = true;
   const registry = new Registry(logger, { voiceDomains: ['light', 'fan', 'switch', 'media_player', 'scene', 'script', 'lock', 'cover', 'climate'] });
   const haClient = new HAClient({ url: ha.url, token: 'test-token', logger, retry: false, onSync: (c) => registry.sync(c) });
   registry.attach(haClient);
@@ -79,6 +83,13 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rt.lastModel).toBe('gpt-realtime-2.1-mini');
     expect(rt.sessions[0]?.output_modalities).toEqual(['text']);
     expect(rt.sessions[0]?.audio).toBeUndefined();
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'response.create' &&
+          (message.response as { tool_choice?: string } | undefined)?.tool_choice === 'none',
+      ),
+    ).toBe(true);
 
     const jsonl = join(cwd, 'var/commands.jsonl');
     expect(existsSync(jsonl)).toBe(true);
@@ -102,6 +113,121 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rec.outcome).toBe('no_action');
     expect(rec.ack).toBe("I don't know that device.");
     expect(ha.callServiceCalls).toHaveLength(0);
+  });
+
+  it('retries a clear device-change no_action once with tool use required', async () => {
+    const { deps, ha, rt } = await makeDeps({
+      responses: [
+        { text: 'I need an exact brightness.' },
+        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+        { text: 'Done.' },
+      ],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the kitchen lights brighter' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'response.create' &&
+          (message.response as { tool_choice?: string; instructions?: string } | undefined)?.tool_choice === 'required' &&
+          (message.response as { instructions?: string }).instructions?.includes('Call control_device now'),
+      ),
+    ).toBe(true);
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'conversation.item.create' &&
+          JSON.stringify(message).includes('Call control_device now'),
+      ),
+    ).toBe(false);
+  });
+
+  it('lets the model correct an invented scene into an area-light mood command', async () => {
+    const badScene = JSON.stringify({
+      action: 'activate',
+      domain: 'scene',
+      target: 'movie mode',
+      area: 'Kitchen',
+    });
+    const { deps, ha, rt } = await makeDeps({
+      responses: [
+        { functionCalls: [{ arguments: badScene }] },
+        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+        { text: 'Done.' },
+      ],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'activate erotica mode in the kitchen' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'mood_requires_light_settings' });
+    expect(rec.decisions[1]).toMatchObject({ outcome: 'execute' });
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'response.create' &&
+          (message.response as { instructions?: string; tools?: Array<{ parameters?: { properties?: Record<string, unknown> } }> } | undefined)?.instructions?.includes(
+            'Correct the previous rejected call',
+          ) &&
+          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["light"]') &&
+          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["Kitchen"]') &&
+          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes(
+            '"required":["action","domain","target","area","light"]',
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it('preserves an explicitly named advertised scene even when the phrase also contains a mood word', async () => {
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: ARGS_MOVIE_SCENE }] }, { text: 'Done.' }],
+    });
+
+    const rec = await runCommand(deps, {
+      kind: 'text',
+      utterance: 'party time: activate the Movie Time scene',
+    });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', entityIds: ['scene.movie_time'] });
+    expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
+  it.each(["don't turn on the kitchen lights", 'do not turn on the kitchen lights', 'should I turn on the kitchen lights?'])(
+    'does not force a tool for negated or informational wording: %s',
+    async (utterance) => {
+      const { deps, ha, rt } = await makeDeps({
+        responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'No action taken.' }],
+      });
+
+      const rec = await runCommand(deps, { kind: 'text', utterance });
+
+      expect(rec.outcome).toBe('refused');
+      expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'not_an_action' });
+      expect(ha.callServiceCalls).toHaveLength(0);
+      expect(
+        rt.received.some(
+          (message) =>
+            message.type === 'response.create' &&
+            (message.response as { tool_choice?: string } | undefined)?.tool_choice === 'required',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('allows a polite directive phrased as a question', async () => {
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'could you turn on the kitchen lights?' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(ha.callServiceCalls).toHaveLength(1);
   });
 
   it('dry-run resolves fully but never calls HA', async () => {
@@ -179,6 +305,21 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rec.ack).toBe('Both done.');
   });
 
+  it('never executes a function call emitted during the optional acknowledgement', async () => {
+    const { deps, ha } = await makeDeps({
+      responses: [
+        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
+      ],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.function_calls).toHaveLength(1);
+    expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
   it('treats unparseable function arguments as a command error but still answers the model', async () => {
     const { deps, ha, rt } = await makeDeps({
       responses: [{ functionCalls: [{ arguments: 'this is not json' }] }, { text: 'Sorry.' }],
@@ -191,11 +332,40 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(output).toBeDefined();
   });
 
+  it('executes a valid corrected call after a malformed call in the same response', async () => {
+    const { deps, ha } = await makeDeps({
+      responses: [
+        { functionCalls: [{ arguments: '{"action":"turn_on","domain' }, { arguments: ARGS_KITCHEN }] },
+        { text: 'Done.' },
+      ],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.error).toBeUndefined();
+    expect(rec.function_calls).toHaveLength(2);
+    expect(rec.decisions).toHaveLength(2);
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'bad_arguments' });
+    expect(rec.decisions[1]).toMatchObject({ outcome: 'execute', service: 'turn_on', verified: true });
+    expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
   it('fails cleanly when session.update is rejected', async () => {
     const { deps } = await makeDeps({ responses: [], errorOnUpdate: 'bad model' });
     const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
     expect(rec.outcome).toBe('error');
     expect(rec.error).toContain('bad model');
+  });
+
+  it('treats a failed model response as an error rather than a successful no_action', async () => {
+    const { deps, ha } = await makeDeps({ responses: [{ status: 'failed' }] });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
+
+    expect(rec.outcome).toBe('error');
+    expect(rec.error).toBe('realtime response failed');
+    expect(ha.callServiceCalls).toHaveLength(0);
   });
 
   it('fails cleanly when the socket drops mid-response', async () => {

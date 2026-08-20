@@ -148,7 +148,15 @@ export function planLightCapabilities(
   serviceData: Record<string, unknown>,
   service = 'turn_on',
 ): LightCapabilityPlan {
-  const capabilityKeys = ['brightness_pct', 'rgb_color', 'color_temp_kelvin', 'effect', 'transition', 'flash'];
+  const capabilityKeys = [
+    'brightness_pct',
+    'brightness_step_pct',
+    'rgb_color',
+    'color_temp_kelvin',
+    'effect',
+    'transition',
+    'flash',
+  ];
   if (!capabilityKeys.some((key) => key in serviceData)) {
     return { ok: true, entityIds, serviceData, skippedEntityIds: [], notes: [] };
   }
@@ -172,7 +180,7 @@ export function planLightCapabilities(
 
   const notes: string[] = [];
   const requested: string[] = [];
-  if ('brightness_pct' in serviceData) {
+  if ('brightness_pct' in serviceData || 'brightness_step_pct' in serviceData) {
     requested.push('brightness');
     retain((entityId) => supportsBrightness(cache, entityId));
   }

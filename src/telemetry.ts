@@ -179,7 +179,10 @@ export function summaryLine(rec: CommandRecord): string {
     const spoken = rec.transcript ?? rec.utterance ?? '(no utterance)';
     const parts: string[] = [`${icon} ${JSON.stringify(spoken)}`];
 
-    const dec = rec.decisions[0];
+    const dec =
+      rec.outcome === 'executed' || rec.outcome === 'dry_run'
+        ? (rec.decisions.find((decision) => decision.outcome !== 'refuse') ?? rec.decisions[0])
+        : rec.decisions[0];
     if (dec && dec.outcome !== 'refuse') {
       const ids = dec.entityIds.slice(0, 3).join(', ') + (dec.entityIds.length > 3 ? ` +${dec.entityIds.length - 3}` : '');
       const verb = dec.service ? dec.service.replace(/^turn_/, '') : '';

@@ -45,7 +45,7 @@ const YamlSchema = z
         mode: z.enum(['per_utterance', 'warm']).default('per_utterance'),
         model: z.string().default(DEFAULT_MODEL),
         transcribe_input: z.boolean().default(true),
-        ack_response: z.boolean().default(true),
+        ack_response: z.boolean().default(false),
       })
       .prefault({}),
     policy: z

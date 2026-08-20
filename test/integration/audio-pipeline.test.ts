@@ -48,7 +48,7 @@ afterEach(async () => {
   cleanups = [];
 });
 
-async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDeps; rt: MockRealtimeServer }> {
+async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDeps; ha: MockHAServer; rt: MockRealtimeServer }> {
   const cwd = mkdtempSync(join(tmpdir(), 'vb-audio-'));
   const ha = await MockHAServer.start();
   const rt = await MockRealtimeServer.start(rtOpts);
@@ -64,7 +64,7 @@ async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDe
     await ha.close();
   });
   await haClient.start();
-  return { deps: { cfg, logger, haClient, registry, sessions }, rt };
+  return { deps: { cfg, logger, haClient, registry, sessions }, ha, rt };
 }
 
 describe.skipIf(!hasFfmpeg)('WavAudioSource', () => {
@@ -124,5 +124,47 @@ describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => 
     expect(session?.audio?.input.format).toEqual({ type: 'audio/pcm', rate: 24_000 });
     expect(session?.audio?.input.turn_detection).toMatchObject({ type: 'server_vad', silence_duration_ms: 500 });
     expect(session?.audio?.input.transcription).toEqual({ model: 'gpt-4o-mini-transcribe' });
+  });
+
+  it('uses a late transcription to recover a clear satellite lighting request', async () => {
+    const args = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Kitchen' });
+    const { deps, ha, rt } = await makeDeps({
+      responses: [{ text: 'I did not understand.' }, { functionCalls: [{ arguments: args }] }],
+      speechStopAfterBytes: 24_000,
+      transcript: 'Sterilites',
+      transcriptAfterResponse: true,
+    });
+    deps.cfg.satellites['sat-kitchen'] = {
+      area: 'Kitchen',
+      host: undefined,
+      port: 6053,
+      haEntryId: undefined,
+      encryptionKeyEnv: undefined,
+      encryptionKey: undefined,
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'vb-wav-'));
+    const wav = join(dir, 'cmd.wav');
+    writeSineWav(wav, 1.5);
+    const wavSource = new WavAudioSource(wav, { ffmpegPath: FFMPEG, pace: false, trailingSilenceMs: 400 });
+    const source: AudioSource = {
+      id: 'sat-kitchen',
+      kind: 'satellite',
+      frames: () => wavSource.frames(),
+      stop: () => wavSource.stop(),
+    };
+
+    const rec = await runCommand(deps, { kind: 'audio', source });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.transcript).toBe('Sterilites');
+    expect(ha.callServiceCalls).toHaveLength(1);
+    expect(rt.sessions[0]?.instructions).toContain('The device that heard this command is in: Kitchen');
+    expect(
+      rt.received.some(
+        (message) =>
+          message.type === 'response.create' &&
+          (message.response as { tool_choice?: string } | undefined)?.tool_choice === 'required',
+      ),
+    ).toBe(true);
   });
 });

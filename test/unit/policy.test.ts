@@ -86,6 +86,7 @@ describe('decide', () => {
       propose({
         light: {
           brightness_pct: 35,
+          brightness_step_pct: null,
           rgb_color: [128, 0, 128],
           color_temp_kelvin: null,
           effect: null,
@@ -117,6 +118,7 @@ describe('decide', () => {
       propose({
         light: {
           brightness_pct: null,
+          brightness_step_pct: null,
           rgb_color: null,
           color_temp_kelvin: null,
           effect: 'sparkle',
@@ -165,6 +167,7 @@ describe('decide', () => {
       propose({
         light: {
           brightness_pct: null,
+          brightness_step_pct: null,
           rgb_color: [255, 0, 0],
           color_temp_kelvin: null,
           effect: null,
@@ -212,6 +215,7 @@ describe('decide', () => {
       propose({
         light: {
           brightness_pct: null,
+          brightness_step_pct: null,
           rgb_color: [255, 0, 0],
           color_temp_kelvin: null,
           effect: null,

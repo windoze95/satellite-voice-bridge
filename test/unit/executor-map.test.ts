@@ -4,6 +4,7 @@ import type { LightOptions } from '../../src/realtime/tools.js';
 
 const light = (overrides: Partial<LightOptions>): LightOptions => ({
   brightness_pct: null,
+  brightness_step_pct: null,
   rgb_color: null,
   color_temp_kelvin: null,
   effect: null,
@@ -66,6 +67,10 @@ describe('mapService (fixed action×domain allowlist)', () => {
       ok: false,
       reason: 'invalid_value',
     });
+    expect(mapService('turn_on', 'light', null, light({ brightness_step_pct: 25 }))).toMatchObject({
+      ok: true,
+      serviceData: { brightness_step_pct: 25 },
+    });
   });
 
   it('allows only transition and flash data on turn_off', () => {
@@ -97,6 +102,9 @@ describe('mapService (fixed action×domain allowlist)', () => {
       ok: false,
       reason: 'invalid_value',
     });
+    expect(
+      mapService('turn_on', 'light', null, light({ brightness_pct: 50, brightness_step_pct: 20 })),
+    ).toMatchObject({ ok: false, reason: 'invalid_value' });
   });
 
   it('refuses set without a usable value', () => {

@@ -95,7 +95,7 @@ ambiguous matches are refused rather than guessed, and the action → HA-service
 mapping is a fixed allowlist, so arbitrary service calls are impossible by
 construction.
 
-Light options are a closed, typed object: brightness percentage, RGB color,
+Light options are a closed, typed object: absolute or relative brightness percentage, RGB color,
 Kelvin temperature, effect, transition time, and short/long flash. The bridge
 checks those options against the selected lights' live Home Assistant
 capabilities, removes duplicate group/member targets, skips unavailable or

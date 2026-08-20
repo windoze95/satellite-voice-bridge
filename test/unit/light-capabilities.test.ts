@@ -119,6 +119,21 @@ describe('planLightCapabilities', () => {
     });
   });
 
+  it('keeps only brightness-capable leaves for a relative brightness change', () => {
+    const cache = cacheOf([
+      { id: 'light.office', members: ['light.dimmable', 'light.onoff'] },
+      { id: 'light.dimmable', modes: ['brightness'] },
+      { id: 'light.onoff', modes: ['onoff'] },
+    ]);
+
+    expect(planLightCapabilities(cache, ['light.office'], { brightness_step_pct: 25 })).toMatchObject({
+      ok: true,
+      entityIds: ['light.dimmable'],
+      serviceData: { brightness_step_pct: 25 },
+      skippedEntityIds: ['light.onoff'],
+    });
+  });
+
   it('refuses an unsupported explicit effect and lists the available choices', () => {
     const cache = cacheOf([{ id: 'light.a', modes: ['xy'], features: 4, effects: ['off', 'candle'] }]);
     const plan = planLightCapabilities(cache, ['light.a'], { effect: 'underwater' });
