@@ -263,6 +263,70 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     },
   );
 
+  // Real transcripts from false wakes on the living-room satellite, each of
+  // which executed a turn_on of five lights before this guard existed.
+  it.each([
+    'Excited and nervous, yeah.',
+    'ChatGPT',
+    "I'm great!",
+    'Good morning.',
+    'Shut up!',
+    'Hey!',
+    '', // transcription ran and heard nothing intelligible
+  ])('refuses a model call for an utterance that is not a command: %j', async (transcript) => {
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'ok' }],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: transcript });
+
+    expect(rec.outcome).toBe('refused');
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'not_a_command' });
+    expect(ha.callServiceCalls).toHaveLength(0);
+  });
+
+  it.each([
+    'turn on the kitchen lights',
+    'all of the lights',
+    'switch on the kitchen lights',
+    'kitchen', // an area alone still reaches the policy engine
+  ])('still lets a real command through: %j', async (utterance) => {
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],
+    });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance });
+
+    expect(rec.outcome).toBe('executed');
+    expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
+  it('still lets an appearance word through to the policy engine', async () => {
+    const brighter = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'kitchen',
+      light: { brightness_step_pct: 25 },
+    });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: brighter }] }, { text: 'Done.' }],
+    });
+    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+      const state = deps.registry.cache?.statesById.get(id);
+      if (!state) throw new Error(`fixture is missing ${id}`);
+      deps.registry.cache?.statesById.set(id, {
+        ...state,
+        attributes: { ...state.attributes, supported_color_modes: ['brightness'] },
+      });
+    }
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the kitchen brighter' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(ha.callServiceCalls).toHaveLength(1);
+  });
+
   it('allows a polite directive phrased as a question', async () => {
     const { deps, ha } = await makeDeps({
       responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'Done.' }],
@@ -465,7 +529,9 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     const { deps, ha, rt } = await makeDeps({
       responses: [{ functionCalls: [{ arguments: 'this is not json' }] }, { text: 'Sorry.' }],
     });
-    const rec = await runCommand(deps, { kind: 'text', utterance: 'do something odd' });
+    // Must read as a device command, or the not-a-command guard refuses it
+    // before the arguments are ever parsed.
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the kitchen lights' });
     expect(rec.outcome).toBe('error');
     expect(rec.error).toContain('bad function arguments');
     expect(ha.callServiceCalls).toHaveLength(0);
@@ -610,6 +676,22 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
       expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
       // Only the flourish touched HA; the model's forced call was ignored.
       expect(ha.callServiceCalls).toHaveLength(1);
+      expect(scheduler.live).toHaveLength(1);
+    });
+
+    it('is unaffected by the not-a-command guard, even with no model call at all', async () => {
+      // The flourish is matched on the transcript and short-circuits before the
+      // model path, so the guard that refuses non-commands can never reach it.
+      const { deps, ha, rt, scheduler } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [RAINBOW];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'super gay in the kitchen' });
+
+      expect(rec.outcome).toBe('executed');
+      expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
+      expect(ha.callServiceCalls).toHaveLength(1);
+      expect(rt.sessions).toHaveLength(0); // never even opened a session
       expect(scheduler.live).toHaveLength(1);
     });
 

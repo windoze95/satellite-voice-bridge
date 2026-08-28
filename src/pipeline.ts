@@ -43,11 +43,13 @@ const NO_SPEECH_GRACE_MS = 5_000;
 const TRANSCRIPT_GRACE_MS = 750;
 const CHANGE_WORDS = new Set([
   'activate',
+  'arm',
   'blink',
   'brighten',
   'brighter',
   'close',
   'color',
+  'disarm',
   'colour',
   'darken',
   'darker',
@@ -132,6 +134,9 @@ const APPEARANCE_WORDS = new Set([
   'yellow',
 ]);
 const DEVICE_WORDS = new Set([
+  // "alarm" is here so a RED-tier request still reaches the tier check and is
+  // refused as red_tier rather than silently as an unrecognised utterance.
+  'alarm',
   'blind',
   'blinds',
   'bulb',
@@ -287,6 +292,42 @@ function lightMoodCorrectionTool(area: string): unknown {
       required: [...CONTROL_DEVICE_TOOL.parameters.required, 'area', 'light'],
     },
   };
+}
+
+/**
+ * Does the utterance mention anything controllable at all — an action, a device,
+ * a room, or a mood?
+ *
+ * A wake word fires on ordinary conversation more often than anyone would like,
+ * and the model, handed one tool and a sentence, reaches for the tool anyway:
+ * "Excited and nervous, yeah." produced a clean turn_on of five lights. An
+ * utterance naming no action, no device, no area and no mood is not a device
+ * command whatever the model proposed. Deliberately generous — one hit anywhere
+ * in this vocabulary is enough — so it only catches utterances that are plainly
+ * not about the house.
+ */
+function looksLikeDeviceCommand(
+  utterance: string,
+  cache: NonNullable<Registry['cache']>,
+  policyCfg: Config['policy'],
+): boolean {
+  const text = normalize(utterance);
+  if (!text) return false; // transcription ran and heard nothing intelligible
+  const words = new Set(text.split(' '));
+  if ([...CHANGE_WORDS].some((word) => words.has(word))) return true;
+  if ([...DEVICE_WORDS].some((word) => words.has(word))) return true;
+  if ([...APPEARANCE_WORDS].some((word) => words.has(word))) return true;
+  if (hasImpliedLightingMood(utterance)) return true;
+
+  const areaPhrases = [
+    ...[...cache.areasById.values()].flatMap((area) => [area.name, ...(area.aliases ?? [])]),
+    ...Object.keys(policyCfg.areaAliases),
+  ];
+  if (areaPhrases.some((phrase) => containsPhrase(text, phrase))) return true;
+  for (const entityId of cache.entitiesById.keys()) {
+    if (containsPhrase(text, displayName(cache, entityId))) return true;
+  }
+  return false;
 }
 
 function shouldRetryWithRequiredTool(
@@ -649,14 +690,29 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       // The transcript can land after the call; this is the flourish's last
       // chance to take over before the model's proposal is acted on.
       if (maybeStartFlourish(spoken)) return;
-      if (spoken && blocksDeviceAction(spoken)) {
+      // Both checks need a transcript. An undefined one means transcription
+      // never reported — unknown, not innocent, but refusing on it would break
+      // real commands whenever STT lags.
+      const notAnAction =
+        spoken !== undefined && blocksDeviceAction(spoken)
+          ? {
+              reason: 'not_an_action',
+              message: 'The utterance was a prohibition or informational question, not a device-change request.',
+            }
+          : spoken !== undefined && !looksLikeDeviceCommand(spoken, cache, policyCfg)
+            ? {
+                reason: 'not_a_command',
+                message: 'The utterance named no device, area, action or mood; a wake word most likely fired on ordinary speech.',
+              }
+            : undefined;
+      if (notAnAction) {
         trace.mark('t5');
         trace.functionCalls.push({ name: event.name, args: event.arguments });
         trace.decisions.push({
           outcome: 'refuse',
           tier: 'unknown',
-          reason: 'not_an_action',
-          message: 'The utterance was a prohibition or informational question, not a device-change request.',
+          reason: notAnAction.reason,
+          message: notAnAction.message,
           entityIds: [],
         });
         trace.outcome = 'refused';
