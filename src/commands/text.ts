@@ -5,20 +5,41 @@ import { runCommand } from '../pipeline.js';
 import { summaryLine } from '../telemetry.js';
 import { AppError, createApp, shutdownApp, type App } from './app.js';
 
-export async function text(args: string[]): Promise<number> {
+export interface TextArgs {
+  ok: true;
+  utterance: string;
+  dryRun: boolean;
+  satelliteId: string | undefined;
+}
+
+export type ParsedTextArgs = TextArgs | { ok: false };
+
+/** Pure arg parsing, so the utterance-eating edge cases are testable. */
+export function parseTextArgs(args: string[]): ParsedTextArgs {
   const dryRun = args.includes('--dry-run');
   const satelliteFlag = args.indexOf('--satellite');
   const satelliteId = satelliteFlag >= 0 ? args[satelliteFlag + 1] : undefined;
-  if (satelliteFlag >= 0 && (!satelliteId || satelliteId.startsWith('--'))) {
+  if (satelliteFlag >= 0 && (!satelliteId || satelliteId.startsWith('--'))) return { ok: false };
+
+  // Skip the value that follows --satellite, and only when the flag is present:
+  // with no flag, indexOf returns -1 and a naive `satelliteFlag + 1` would drop
+  // argument 0 — the utterance itself.
+  const satelliteValueIndex = satelliteFlag >= 0 ? satelliteFlag + 1 : -1;
+  const utterance = args
+    .filter((a, i) => !a.startsWith('--') && i !== satelliteValueIndex)
+    .join(' ')
+    .trim();
+  if (!utterance) return { ok: false };
+  return { ok: true, utterance, dryRun, satelliteId };
+}
+
+export async function text(args: string[]): Promise<number> {
+  const parsed = parseTextArgs(args);
+  if (!parsed.ok) {
     console.error('usage: voicebridge text "<utterance>" [--dry-run] [--satellite <id>]');
     return 2;
   }
-  const words = args.filter((a, i) => !a.startsWith('--') && i !== satelliteFlag + 1);
-  const utterance = words.join(' ').trim();
-  if (!utterance) {
-    console.error('usage: voicebridge text "<utterance>" [--dry-run] [--satellite <id>]');
-    return 2;
-  }
+  const { utterance, dryRun, satelliteId } = parsed;
 
   let app: App;
   try {

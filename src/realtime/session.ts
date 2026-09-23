@@ -3,13 +3,18 @@
 import type { Logger } from '../logger.js';
 import { RealtimeClient } from './client.js';
 import type { AudioInputConfig, SessionConfig } from './events.js';
-import { CONTROL_DEVICE_TOOL } from './tools.js';
+import { CONTROL_DEVICE_TOOL, DELEGATE_TOOL, DISMISS_TOOL } from './tools.js';
 
 export const AUDIO_SAMPLE_RATE = 24_000;
 /** Recycle warm sessions before the hard 60-minute session cap. */
 const DEFAULT_MAX_AGE_MS = 55 * 60 * 1000;
 
-export function buildSessionConfig(opts: { instructions: string; audio: boolean; transcribe: boolean }): SessionConfig {
+export function buildSessionConfig(opts: {
+  instructions: string;
+  audio: boolean;
+  transcribe: boolean;
+  delegate?: boolean;
+}): SessionConfig {
   const audioInput: AudioInputConfig = {
     format: { type: 'audio/pcm', rate: AUDIO_SAMPLE_RATE },
     // language pins Whisper to English: ambient noise otherwise transcribes as
@@ -30,8 +35,12 @@ export function buildSessionConfig(opts: { instructions: string; audio: boolean;
     type: 'realtime',
     output_modalities: ['text'],
     instructions: opts.instructions,
-    tools: [CONTROL_DEVICE_TOOL],
-    tool_choice: 'auto',
+    tools: opts.delegate ? [CONTROL_DEVICE_TOOL, DISMISS_TOOL, DELEGATE_TOOL] : [CONTROL_DEVICE_TOOL, DISMISS_TOOL],
+    // Forcing a tool removes the "reply with a sentence instead of deciding"
+    // path. Every utterance now produces one explicit, logged decision from the
+    // model that actually heard it, which is what lets the bridge stop guessing
+    // at intent from a vocabulary list. `dismiss` is the pressure valve.
+    tool_choice: 'required',
     // Multiple per-light function calls can exceed 500 tokens even though no
     // spoken/text answer is needed. Keep enough headroom for a modest room.
     max_output_tokens: 1200,
@@ -45,6 +54,8 @@ export interface SessionManagerOptions {
   apiKey: string;
   model: string;
   transcribe: boolean;
+  /** Advertise the delegate tool; false when delegation is disabled in config. */
+  delegate: boolean;
   logger: Logger;
   maxAgeMs?: number;
 }
@@ -71,7 +82,7 @@ export class SessionManager {
       const existing = this.usableWarmClient();
       if (existing) {
         if (this.warmInstructions !== instructions || this.warmAudio !== audio) {
-          await existing.updateSession(buildSessionConfig({ instructions, audio, transcribe: this.opts.transcribe }));
+          await existing.updateSession(buildSessionConfig({ instructions, audio, transcribe: this.opts.transcribe, delegate: this.opts.delegate }));
           this.warmInstructions = instructions;
           this.warmAudio = audio;
         }
@@ -84,7 +95,7 @@ export class SessionManager {
       model: this.opts.model,
       logger: this.opts.logger,
     });
-    await client.updateSession(buildSessionConfig({ instructions, audio, transcribe: this.opts.transcribe }));
+    await client.updateSession(buildSessionConfig({ instructions, audio, transcribe: this.opts.transcribe, delegate: this.opts.delegate }));
     if (this.opts.mode === 'warm') {
       this.warmClient = client;
       this.warmInstructions = instructions;
@@ -117,8 +128,13 @@ export class SessionManager {
   async updateInstructions(instructions: string): Promise<void> {
     const client = this.usableWarmClient();
     if (!client || this.warmInstructions === instructions) return;
-    await client.updateSession(buildSessionConfig({ instructions, audio: this.warmAudio, transcribe: this.opts.transcribe }));
+    await client.updateSession(buildSessionConfig({ instructions, audio: this.warmAudio, transcribe: this.opts.transcribe, delegate: this.opts.delegate }));
     this.warmInstructions = instructions;
+  }
+
+  /** Drop a warm session's accumulated conversation; a no-op in per_utterance mode. */
+  pruneConversation(): void {
+    this.warmClient?.pruneConversation();
   }
 
   close(): void {

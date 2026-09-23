@@ -2,12 +2,16 @@
 # because it describes your house (area aliases, opt-ins, satellite placement).
 
 session:
-  # per_utterance: open a Realtime session when a command starts (simple, pays
-  #   connection setup on every command).
   # warm: keep a configured session open so audio can start streaming
   #   immediately (recycled automatically before the 60-minute session cap).
-  mode: per_utterance
-  model: gpt-realtime-2.1-mini
+  #   Required for follow-ups to be worth having — otherwise the second
+  #   utterance pays a fresh connection setup.
+  # per_utterance: open a Realtime session when a command starts (simple, pays
+  #   connection setup on every command).
+  mode: warm
+  # The full model, not the mini: it follows the tool contract more reliably and
+  # reads tone from the audio, which is what the mood composer runs on.
+  model: gpt-realtime-2.1
   # Ask OpenAI to also transcribe input audio (logged for debugging; small cost).
   transcribe_input: true
   # Optional logged acknowledgement after execution. Keep false for a
@@ -34,6 +38,29 @@ policy:
   #   "down here": [Living Room, Kitchen]
   #   "downstairs": [Living Room, Kitchen]
   area_aliases: {}
+
+# Keep listening after a command so a follow-up needs no second wake word.
+# This holds the satellite microphone open and streaming for the window, so it
+# is opt-out rather than implicit: set follow_up_seconds: 0 to disable.
+# The window closes early when the model judges what it heard to be ordinary
+# conversation, and max_follow_ups caps a chain so a loud room cannot hold the
+# microphone open indefinitely.
+conversation:
+  follow_up_seconds: 6
+  max_follow_ups: 3
+
+# The stronger model the fast one hands off to. Reached only when the fast model
+# calls `delegate` (it is unsure, or the request needs real coordination), or
+# when policy refused a command that looked like a near miss — never on the
+# common path. Expect roughly 2-3 s when it is used, against ~0.5 s without.
+# Whatever it proposes goes through the same policy engine, so delegating buys a
+# better plan and never wider authority.
+delegate:
+  enabled: true
+  model: gpt-6-luna
+  # none | low | medium | high | xhigh | max. Anything above "none" adds seconds.
+  reasoning_effort: none
+  timeout_seconds: 8
 
 # Satellite1 ESPHome native-API connections. Home Assistant's config-entry ID
 # lets the bridge fetch the Noise encryption key at runtime without copying the
@@ -72,6 +99,19 @@ flourishes: []
 #     rotate_transition_seconds: 0
 #     brightness_pct: 100
 #     duration_seconds: 5
+
+# Override the built-in lighting recipes. The model chooses a mood and an area;
+# the bridge decides which bulb does what, using each light's live capabilities.
+# Lights are classified key (ceilings, mains), accent (colour-capable character
+# lighting) or utility (closets, cabinets) from their names and capabilities.
+# Anything you leave out keeps the built-in value.
+moods: {}
+# moods:
+#   intimate:
+#     key: { off: true }
+#     accent: { rgb: [255, 60, 30], brightness_pct: 10 }
+#   focus:
+#     key: { kelvin: 5000, brightness_pct: 100 }
 
 telemetry:
   jsonl_path: var/commands.jsonl

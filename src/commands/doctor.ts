@@ -60,6 +60,19 @@ export async function doctor(args: string[]): Promise<number> {
   const env = environmentCheck(cfg);
   report(env.ok ? 'ok' : 'fail', 'env', env.detail);
 
+  // 2b. conversation settings that only make sense together
+  if (cfg.conversation.followUpMs > 0 && cfg.session.mode !== 'warm') {
+    report(
+      'warn',
+      'follow-ups',
+      `enabled (${cfg.conversation.followUpMs} ms) but session.mode is "${cfg.session.mode}" — each follow-up reopens a Realtime session; set session.mode: warm`,
+    );
+  } else if (cfg.conversation.followUpMs > 0) {
+    report('ok', 'follow-ups', `${cfg.conversation.followUpMs} ms window, up to ${cfg.conversation.maxFollowUps} chained`);
+  } else {
+    report('skip', 'follow-ups', 'disabled (conversation.follow_up_seconds: 0)');
+  }
+
   // 3. ffmpeg (audio path only)
   {
     const res = spawnSync(cfg.ffmpegPath, ['-version'], { encoding: 'utf8' });
@@ -173,7 +186,14 @@ export async function doctor(args: string[]): Promise<number> {
       const t = performance.now();
       try {
         rt = await RealtimeClient.connect({ url: cfg.realtimeUrl, apiKey: cfg.openaiApiKey, model: cfg.session.model, logger });
-        await rt.updateSession(buildSessionConfig({ instructions: SYNTHETIC_INSTRUCTIONS, audio: false, transcribe: false }));
+        await rt.updateSession(
+          buildSessionConfig({
+            instructions: SYNTHETIC_INSTRUCTIONS,
+            audio: false,
+            transcribe: false,
+            delegate: cfg.delegate.enabled,
+          }),
+        );
         report('ok', 'realtime session', `created+updated [${cfg.session.model}]`, t);
       } catch (err) {
         report('fail', 'realtime session', `[${cfg.session.model}] ${err instanceof Error ? err.message : String(err)}`, t);
@@ -192,6 +212,34 @@ export async function doctor(args: string[]): Promise<number> {
           report('fail', 'function call', err instanceof Error ? err.message : String(err), t2);
         }
         rt.close();
+      }
+    }
+
+    // The delegate is a different API surface on the same key; a bad model id
+    // here is otherwise invisible until the first hard command at 2 a.m.
+    if (!cfg.delegate.enabled) {
+      report('skip', 'delegate model', 'disabled (delegate.enabled: false)');
+    } else if (!authOk) {
+      report('skip', 'delegate model', 'requires openai auth');
+    } else {
+      const t3 = performance.now();
+      try {
+        const res = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(cfg.delegate.model)}`, {
+          headers: { Authorization: `Bearer ${cfg.openaiApiKey}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (res.ok) {
+          report('ok', 'delegate model', `${cfg.delegate.model} available (effort ${cfg.delegate.reasoningEffort})`, t3);
+        } else {
+          report(
+            'fail',
+            'delegate model',
+            `${cfg.delegate.model} not available to this key (HTTP ${res.status}) — set delegate.model or delegate.enabled: false`,
+            t3,
+          );
+        }
+      } catch (err) {
+        report('fail', 'delegate model', `${cfg.delegate.model}: ${err instanceof Error ? err.message : String(err)}`, t3);
       }
     }
   }

@@ -57,7 +57,7 @@ async function makeDeps(rtOpts: MockRealtimeOptions): Promise<{ deps: PipelineDe
   const registry = new Registry(logger, { voiceDomains: ['light'] });
   const haClient = new HAClient({ url: ha.url, token: 'test-token', logger, retry: false, onSync: (c) => registry.sync(c) });
   registry.attach(haClient);
-  const sessions = new SessionManager({ mode: 'per_utterance', url: rt.url, apiKey: 'sk-test', model: cfg.session.model, transcribe: true, logger });
+  const sessions = new SessionManager({ mode: 'per_utterance', url: rt.url, apiKey: 'sk-test', model: cfg.session.model, transcribe: true, delegate: false, logger });
   cleanups.push(async () => {
     sessions.close();
     haClient.stop();
@@ -91,6 +91,42 @@ describe.skipIf(!hasFfmpeg)('WavAudioSource', () => {
     })()).rejects.toThrow(/not found/);
   });
 });
+
+/** Fixture lights advertise no capabilities; appearance tests need some. */
+function capableKitchen(deps: PipelineDeps): void {
+  for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
+    const state = deps.registry.cache?.statesById.get(id);
+    if (!state) throw new Error(`fixture is missing ${id}`);
+    deps.registry.cache?.statesById.set(id, {
+      ...state,
+      attributes: {
+        ...state.attributes,
+        supported_color_modes: ['color_temp'],
+        min_color_temp_kelvin: 2000,
+        max_color_temp_kelvin: 6500,
+      },
+    });
+  }
+}
+
+function placeSatellite(deps: PipelineDeps): void {
+  deps.cfg.satellites['sat-kitchen'] = {
+    area: 'Kitchen',
+    host: undefined,
+    port: 6053,
+    haEntryId: undefined,
+    encryptionKeyEnv: undefined,
+    encryptionKey: undefined,
+  };
+}
+
+function wavSource(id: string): AudioSource {
+  const dir = mkdtempSync(join(tmpdir(), 'vb-wav-'));
+  const wav = join(dir, 'cmd.wav');
+  writeSineWav(wav, 1.5);
+  const source = new WavAudioSource(wav, { ffmpegPath: FFMPEG, pace: false, trailingSilenceMs: 400 });
+  return { id, kind: 'satellite', frames: () => source.frames(), stop: () => source.stop() };
+}
 
 describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => {
   it('streams audio, VAD ends speech, function call executes', async () => {
@@ -128,64 +164,52 @@ describe.skipIf(!hasFfmpeg)('audio pipeline (mock OpenAI VAD + mock HA)', () => 
     expect(session?.audio?.input.transcription).toEqual({ model: 'gpt-4o-mini-transcribe', language: 'en' });
   });
 
-  it('uses a late transcription to recover a clear satellite lighting request', async () => {
+  it('acts on a spoken command whose transcription lands after the tool call', async () => {
     const args = JSON.stringify({
       action: 'turn_on',
       domain: 'light',
       target: 'lights',
       area: 'Kitchen',
       light: { brightness_pct: 100, color_temp_kelvin: 6500 },
+      tone: 'urgent',
     });
     const { deps, ha, rt } = await makeDeps({
-      responses: [{ text: 'I did not understand.' }, { functionCalls: [{ arguments: args }] }],
+      responses: [{ functionCalls: [{ arguments: args }] }],
       speechStopAfterBytes: 24_000,
-      transcript: 'Sterilites',
+      transcript: 'sterile lights in here',
       transcriptAfterResponse: true,
     });
-    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
-      const state = deps.registry.cache?.statesById.get(id);
-      if (!state) throw new Error(`fixture is missing ${id}`);
-      deps.registry.cache?.statesById.set(id, {
-        ...state,
-        attributes: {
-          ...state.attributes,
-          supported_color_modes: ['color_temp'],
-          min_color_temp_kelvin: 2000,
-          max_color_temp_kelvin: 6500,
-        },
-      });
-    }
-    deps.cfg.satellites['sat-kitchen'] = {
-      area: 'Kitchen',
-      host: undefined,
-      port: 6053,
-      haEntryId: undefined,
-      encryptionKeyEnv: undefined,
-      encryptionKey: undefined,
-    };
-    const dir = mkdtempSync(join(tmpdir(), 'vb-wav-'));
-    const wav = join(dir, 'cmd.wav');
-    writeSineWav(wav, 1.5);
-    const wavSource = new WavAudioSource(wav, { ffmpegPath: FFMPEG, pace: false, trailingSilenceMs: 400 });
-    const source: AudioSource = {
-      id: 'sat-kitchen',
-      kind: 'satellite',
-      frames: () => wavSource.frames(),
-      stop: () => wavSource.stop(),
-    };
+    capableKitchen(deps);
+    placeSatellite(deps);
 
-    const rec = await runCommand(deps, { kind: 'audio', source });
+    const rec = await runCommand(deps, { kind: 'audio', source: wavSource('sat-kitchen') });
 
     expect(rec.outcome).toBe('executed');
-    expect(rec.transcript).toBe('Sterilites');
+    expect(rec.transcript).toBe('sterile lights in here');
+    expect(rec.tone).toBe('urgent');
     expect(ha.callServiceCalls).toHaveLength(1);
     expect(rt.sessions[0]?.instructions).toContain('The device that heard this command is in: Kitchen');
-    expect(
-      rt.received.some(
-        (message) =>
-          message.type === 'response.create' &&
-          (message.response as { tool_choice?: string } | undefined)?.tool_choice === 'required',
-      ),
-    ).toBe(true);
+    // Forcing a tool choice is what removed the model's "reply with prose" path.
+    expect(rt.sessions[0]?.tool_choice).toBe('required');
+  });
+
+  it('still vetoes a prohibition whose transcription arrives only after the tool call', async () => {
+    const args = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Kitchen' });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: args }] }],
+      speechStopAfterBytes: 24_000,
+      transcript: "don't turn on the kitchen lights",
+      transcriptAfterResponse: true,
+    });
+    capableKitchen(deps);
+    placeSatellite(deps);
+
+    // The model proposed an action before the words were known. The transcript
+    // veto is the one guard that still runs after the fact, and it has to win.
+    const rec = await runCommand(deps, { kind: 'audio', source: wavSource('sat-kitchen') });
+
+    expect(rec.outcome).toBe('refused');
+    expect(rec.decisions[0]).toMatchObject({ reason: 'not_an_action' });
+    expect(ha.callServiceCalls).toHaveLength(0);
   });
 });

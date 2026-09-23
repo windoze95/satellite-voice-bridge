@@ -1,6 +1,6 @@
 # satellite-voice-bridge
 
-Low-latency voice control for Home Assistant: a [FutureProofHomes Satellite1](https://futureproofhomes.net/) does on-device wake-word detection and streams command audio over the LAN to this bridge, which streams it to the OpenAI Realtime API with **function calling enabled and no audio output** — there is no speaker and no TTS. The model proposes a single `control_device` call, a local policy engine authorizes it, and the bridge executes it against Home Assistant. The response to "turn on the kitchen lights" is the kitchen lights turning on.
+Low-latency voice control for Home Assistant: a [FutureProofHomes Satellite1](https://futureproofhomes.net/) does on-device wake-word detection and streams command audio over the LAN to this bridge, which streams it to the OpenAI Realtime API with **function calling enabled and no audio output** — there is no speaker and no TTS. The model decides what it heard, a local policy engine authorizes it, and the bridge executes it against Home Assistant. The response to "turn on the kitchen lights" is the kitchen lights turning on.
 
 ```
 Satellite1 (wake word, mics, XMOS)
@@ -8,12 +8,19 @@ Satellite1 (wake word, mics, XMOS)
       ▼
 voicebridge (this repo, always-on Mac)
       │ audio ──────────────► OpenAI Realtime (text + function-call output only)
-      │ ◄────────── control_device(action, domain, target, area, value, light)
-      ▼
+      │ ◄─── control_device(…, tone) · dismiss(reason, tone) · delegate(request)
+      │                                             │
+      │                              delegate ──────► gpt-6-luna (Responses API)
+      │                                             │  plans the hard ones
+      ▼                                             ▼
 policy engine (GREEN/YELLOW/RED, local, deterministic)
       ▼
 Home Assistant ──► the actual device
 ```
+
+The model must pick exactly one of three tools on every utterance, so intent is
+decided once, explicitly, by the only participant that heard the audio — and the
+bridge never has to infer "was that a command?" from a vocabulary list.
 
 ## Status
 
@@ -24,6 +31,11 @@ Home Assistant ──► the actual device
   wake lifecycle, streaming 16→24 kHz resampling, reconnects, and clean shutdown.
 - ✅ Capability-aware light control: brightness, RGB color, color temperature,
   effects, transitions, and flashing, with duplicate groups removed locally.
+- ✅ Explicit intent: `dismiss` for overheard conversation, `delegate` for
+  requests that need real thought, `tone` on every call.
+- ✅ Local mood composer: the model names a mood, the bridge decides which bulb
+  does what.
+- ✅ Follow-up window: keep talking for a few seconds with no second wake word.
 
 ## Quickstart
 
@@ -39,7 +51,8 @@ npm run build
 
 node dist/index.js doctor          # every dependency checked, ✓/✗
 node dist/index.js text "turn on the kitchen lights" --dry-run
-node dist/index.js text "party time in the office" --dry-run
+node dist/index.js text "hit the lights" --dry-run
+node dist/index.js text "set the mood in the office" --dry-run
 node dist/index.js text "make the office purple at 60 percent" --dry-run
 node dist/index.js text "set the office to warm white over five seconds" --dry-run
 node dist/index.js text "turn on the kitchen lights"
@@ -83,6 +96,97 @@ utterance follows it. `firmware/` builds stock Satellite1 firmware plus an
 overlay adding the **"computer"** wake word and a Home Assistant switch per
 wake word; see `firmware/README.md`.
 
+## Intent, tone, and taking a hint
+
+The session runs with `tool_choice: required` and three tools, so every utterance
+produces one logged decision:
+
+| tool | meaning |
+|---|---|
+| `control_device(…)` | change something in the house |
+| `dismiss(reason, tone)` | not a command — people were talking, or it was a question, or a prohibition |
+| `delegate(request, why)` | real request, needs more thought than a sub-second model should spend |
+
+`dismiss` is what makes a wake word firing on ordinary conversation harmless. It
+replaced a ~150-word vocabulary the bridge used to check the transcript against,
+which was simultaneously too generous (any sentence containing "turn", "make" or
+"light" passed) and too narrow (a verb like "hit" was invisible). One transcript
+check survives, and it can only ever say no: a prohibition ("don't turn on the
+lights") or an informational question is refused even if the model proposed an
+action.
+
+`tone` is required on every call and comes from the **audio**, not the words:
+`neutral · intimate · playful · urgent · tired · annoyed · excited · hushed`.
+It is the only thing in the system that can tell a murmur from a shout, and it
+feeds the mood composer below — so the same words, said two ways, land on two
+different brightnesses. Every command logs it, so the behavior is tunable from
+`var/commands.jsonl` rather than from guesswork.
+
+## Who decides which light does what
+
+The model names a **mood** and an area; the bridge renders it. `light.mood` is a
+closed set — `intimate · romantic · cozy · focus · clinical · party · cinema ·
+wake · wind_down · normal` — and `src/policy/mood.ts` turns one into concrete
+per-light settings locally, in no measurable time and no tokens:
+
+1. flatten HA light groups to leaves and drop unavailable ones
+2. classify each light **key** (ceilings, mains), **accent** (colour-capable
+   character lighting) or **utility** (closets, cabinets) from its name and
+   capabilities
+3. apply the mood's recipe per role, scaled and warmed by `tone`
+4. drop anything a given bulb cannot do, clamp Kelvin to its real range
+5. group lights that end up identical into one service call
+
+Asking a low-latency voice model to invent an RGB triple per bulb meant holding
+the room's inventory, each bulb's capabilities and a colour scheme at once — and
+when it got that wrong the only recourse was to reject the call and ask the same
+model again. Recipes are overridable per-mood under `moods:` in
+`voicebridge.yaml`, so taste is config rather than code. Explicit requests
+("purple at 60 percent") still use the ordinary `light.*` fields.
+
+## Delegation
+
+When the fast model calls `delegate`, or when policy refuses a command for a
+near-miss reason (`no_confident_match`, `ambiguous`, `no_devices_in_scope`,
+`unknown_area`), the bridge asks a stronger model — `gpt-6-luna` on the Responses
+API with `reasoning.effort: none` — to plan the change, then runs the result
+through **the same policy engine**. Delegating buys a better plan, never wider
+authority.
+
+Measured at roughly **2.2–3.0 s** for a multi-light plan, against ~0.5 s for the
+realtime model alone, so it is deliberately off the common path. The escalation
+case *replaces* a round trip rather than adding one: the old behaviour re-asked
+the model that had just failed. Records carry `delegated`, and `t4a`/`t4b`
+bracket the handoff.
+
+Delegate token counts are logged, but `cost_usd` covers the realtime model only —
+there is no verified price for `gpt-6-luna` to put in the table, and a guessed
+one would silently corrupt every cost figure.
+
+## Follow-ups
+
+`conversation.follow_up_seconds` (default 6) keeps the microphone open after a
+command so the next utterance needs no wake word:
+
+```
+"computer, turn on the office lights"  → lights on
+"dim it a bit"                         → dimmed      (no wake word)
+(silence)                              → mic closes
+```
+
+The mechanism is ESPHome's: the Satellite stops streaming when it receives
+`STT_VAD_END`, so the bridge simply withholds that event until the chain ends.
+The chain shares one Realtime conversation, which is what lets "dim it a bit"
+resolve against what just happened; that history is pruned once the chain ends so
+it cannot colour the next person who says the wake word. A follow-up the model
+`dismiss`es closes the window immediately — continuing to listen is exactly the
+wrong answer to "that wasn't for me" — and `max_follow_ups` (default 3) caps a
+chain so a loud room cannot hold the microphone open.
+
+This holds a live microphone open in the room for the window. Set
+`follow_up_seconds: 0` to turn it off. It needs `session.mode: warm` to be worth
+having; `doctor` warns if you have one without the other.
+
 ## Flourishes (the one thing the model never sees)
 
 Everything spoken is model-interpreted except phrases listed under `flourishes:`
@@ -101,8 +205,9 @@ on the same lights cancels the pending restore rather than undoing itself.
 
 ## How commands are authorized
 
-The model can only ever propose `control_device(action, domain, target, area, value, light)`.
-The bridge — not the model — decides what runs:
+The model can only ever propose `control_device(action, domain, target, area, value, light, tone)`.
+The bridge — not the model — decides what runs. This is true of a delegated plan
+and a rendered mood exactly as it is of a spoken command:
 
 - **GREEN** (lights, fans, switches, media, scenes, scripts): resolved against
   the HA registry and executed immediately.
@@ -137,6 +242,7 @@ Every command logs one JSONL record (`var/commands.jsonl`) with timestamps:
 | T2 | first audio chunk sent |
 | T3 | end of speech (server VAD) |
 | T4 | function-call arguments complete |
+| T4a/T4b | delegation to the strong model started / returned (when used) |
 | T5 | policy decision |
 | T6 | HA service call sent |
 | T7 | HA acknowledged |

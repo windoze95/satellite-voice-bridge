@@ -11,9 +11,17 @@ describe('loadConfig', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'vb-'));
     const cfg = loadConfig(BASE_ENV, cwd);
     expect(cfg.configFileFound).toBe(false);
-    expect(cfg.session.mode).toBe('per_utterance');
+    // Warm by default: a follow-up window is only worth having if the second
+    // utterance does not pay a fresh session setup.
+    expect(cfg.session.mode).toBe('warm');
     expect(cfg.session.model).toBe(DEFAULT_MODEL);
     expect(cfg.session.ackResponse).toBe(false);
+    expect(cfg.conversation.followUpMs).toBe(6000);
+    expect(cfg.conversation.maxFollowUps).toBe(3);
+    expect(cfg.delegate.enabled).toBe(true);
+    expect(cfg.delegate.model).toBe('gpt-6-luna');
+    expect(cfg.delegate.reasoningEffort).toBe('none');
+    expect(cfg.moods).toEqual({});
     expect(cfg.policy.tiers.green).toContain('light');
     expect(cfg.policy.tiers.red).toContain('alarm_control_panel');
     expect(cfg.policy.matching.minConfidence).toBe(0.6);

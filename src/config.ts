@@ -5,7 +5,8 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 import type { LightOptions } from './realtime/tools.js';
 
-export const DEFAULT_MODEL = 'gpt-realtime-2.1-mini';
+export const DEFAULT_MODEL = 'gpt-realtime-2.1';
+export const DEFAULT_DELEGATE_MODEL = 'gpt-6-luna';
 
 const MatchingSchema = z
   .object({
@@ -38,6 +39,8 @@ const SatelliteSchema = z.union([
     })
     .strict(),
 ]);
+
+const ReasoningEffortSchema = z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 const RgbSchema = z.tuple([
   z.number().int().min(0).max(255),
@@ -78,11 +81,26 @@ const FlourishSchema = z
     'effect, rgb_color, color_temp_kelvin, and rotate_rgb are mutually exclusive',
   );
 
+// Per-mood overrides for the local lighting composer. Taste belongs in config:
+// a recipe that is wrong for your house should not need a code change.
+const MoodLayerSchema = z
+  .object({
+    rgb: RgbSchema.optional(),
+    kelvin: z.number().positive().optional(),
+    brightness_pct: z.number().min(0).max(100).optional(),
+    off: z.boolean().optional(),
+  })
+  .strict();
+
+const MoodOverrideSchema = z
+  .object({ key: MoodLayerSchema.optional(), accent: MoodLayerSchema.optional(), utility: MoodLayerSchema.optional() })
+  .strict();
+
 const YamlSchema = z
   .object({
     session: z
       .object({
-        mode: z.enum(['per_utterance', 'warm']).default('per_utterance'),
+        mode: z.enum(['per_utterance', 'warm']).default('warm'),
         model: z.string().default(DEFAULT_MODEL),
         transcribe_input: z.boolean().default(true),
         ack_response: z.boolean().default(false),
@@ -103,8 +121,28 @@ const YamlSchema = z
         area_aliases: z.record(z.string(), z.array(z.string())).prefault({}),
       })
       .prefault({}),
+    // Keep listening after a command so a follow-up needs no second wake word.
+    // This holds the satellite microphone open, so it is stated explicitly
+    // rather than inferred: 0 disables it entirely.
+    conversation: z
+      .object({
+        follow_up_seconds: z.number().min(0).max(30).default(6),
+        max_follow_ups: z.number().int().min(0).max(10).default(3),
+      })
+      .prefault({}),
+    // The slower, stronger model the fast one hands off to. Reached only when
+    // the fast model asks, or when policy refused a resolvable-looking command.
+    delegate: z
+      .object({
+        enabled: z.boolean().default(true),
+        model: z.string().default(DEFAULT_DELEGATE_MODEL),
+        reasoning_effort: ReasoningEffortSchema.default('none'),
+        timeout_seconds: z.number().positive().max(60).default(8),
+      })
+      .prefault({}),
     satellites: z.record(z.string(), SatelliteSchema).prefault({}),
     flourishes: z.array(FlourishSchema).default([]),
+    moods: z.record(z.string(), MoodOverrideSchema).prefault({}),
     telemetry: z.object({ jsonl_path: z.string().default('var/commands.jsonl') }).prefault({}),
   })
   .prefault({});
@@ -115,6 +153,30 @@ export interface PolicyConfig {
   yellowAllow: string[];
   matching: { minConfidence: number; maxCollectiveTargets: number };
   areaAliases: Record<string, string[]>;
+}
+
+export interface MoodLayerOverride {
+  rgb?: [number, number, number];
+  kelvin?: number;
+  brightnessPct?: number;
+  off?: boolean;
+}
+
+export type MoodOverrides = Partial<Record<'key' | 'accent' | 'utility', MoodLayerOverride>>;
+
+export interface ConversationConfig {
+  /** 0 disables the follow-up window; the mic then closes after every command. */
+  followUpMs: number;
+  maxFollowUps: number;
+}
+
+export interface DelegateConfig {
+  enabled: boolean;
+  model: string;
+  /** Responses API endpoint; overridable for a proxy or a test double. */
+  url: string;
+  reasoningEffort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  timeoutMs: number;
 }
 
 export interface SatelliteConfig {
@@ -153,8 +215,11 @@ export interface Config {
   configFileFound: boolean;
   session: { mode: 'per_utterance' | 'warm'; model: string; transcribeInput: boolean; ackResponse: boolean };
   policy: PolicyConfig;
+  conversation: ConversationConfig;
+  delegate: DelegateConfig;
   satellites: Record<string, SatelliteConfig>;
   flourishes: FlourishConfig[];
+  moods: Record<string, MoodOverrides>;
   telemetry: { jsonlPath: string };
 }
 
@@ -205,6 +270,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd: string = p
       },
       areaAliases: y.policy.area_aliases,
     },
+    conversation: {
+      followUpMs: Math.round(y.conversation.follow_up_seconds * 1000),
+      maxFollowUps: y.conversation.max_follow_ups,
+    },
+    delegate: {
+      enabled: y.delegate.enabled,
+      model: env.VOICEBRIDGE_DELEGATE_MODEL || y.delegate.model,
+      url: env.VOICEBRIDGE_RESPONSES_URL || 'https://api.openai.com/v1/responses',
+      reasoningEffort: y.delegate.reasoning_effort,
+      timeoutMs: Math.round(y.delegate.timeout_seconds * 1000),
+    },
     satellites: Object.fromEntries(
       Object.entries(y.satellites).map(([id, satellite]) => [
         id,
@@ -229,6 +305,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd: string = p
         rgb_color: f.rgb_color ?? f.rotate_rgb?.[0] ?? null,
         color_temp_kelvin: f.color_temp_kelvin ?? null,
         effect: f.effect ?? null,
+        // Flourishes are fixed looks by definition; they never go through the
+        // mood composer.
+        mood: null,
         transition_seconds: f.transition_seconds ?? null,
         flash: null,
       },
@@ -241,6 +320,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd: string = p
           }
         : null,
     })),
+    moods: Object.fromEntries(
+      Object.entries(y.moods).map(([mood, override]) => [
+        mood,
+        Object.fromEntries(
+          Object.entries(override)
+            .filter(([, patch]) => patch !== undefined)
+            .map(([role, patch]) => [
+              role,
+              {
+                rgb: patch!.rgb,
+                kelvin: patch!.kelvin,
+                brightnessPct: patch!.brightness_pct,
+                off: patch!.off,
+              } satisfies MoodLayerOverride,
+            ]),
+        ) as MoodOverrides,
+      ]),
+    ),
     telemetry: { jsonlPath: resolve(cwd, y.telemetry.jsonl_path) },
   };
 }

@@ -29,12 +29,42 @@ export class SatelliteAudioSource implements AudioSource {
   private failure: Error | null = null;
   private consumerStarted = false;
   private speechHasStarted = false;
+  private windowExpired = false;
 
   constructor(
     readonly id: string,
     private readonly opts: SatelliteAudioSourceOptions = {},
   ) {
     this.maxBufferedBytes = opts.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+  }
+
+  /** False once this turn is closed, so the run buffers audio for the next one. */
+  get accepting(): boolean {
+    return !this.ended && !this.stopped;
+  }
+
+  get expired(): boolean {
+    return this.windowExpired;
+  }
+
+  get speechDetected(): boolean {
+    return this.speechHasStarted;
+  }
+
+  /**
+   * The follow-up window closed with nothing said. Ends the turn without the
+   * five-second no-speech grace an exhausted source normally gets: there is
+   * nothing in flight to wait for, and the satellite should go back to its wake
+   * word promptly.
+   */
+  expire(): void {
+    if (this.speechHasStarted || this.ended || this.stopped) return;
+    this.windowExpired = true;
+    this.ended = true;
+    this.queue.length = 0;
+    this.bufferedBytes = 0;
+    this.resampler.reset();
+    this.wakeWaiters();
   }
 
   /** Push a native Satellite1 audio packet (PCM16LE mono, 16 kHz). */

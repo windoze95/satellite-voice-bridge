@@ -8,6 +8,7 @@ const light = (overrides: Partial<LightOptions>): LightOptions => ({
   rgb_color: null,
   color_temp_kelvin: null,
   effect: null,
+  mood: null,
   transition_seconds: null,
   flash: null,
   ...overrides,

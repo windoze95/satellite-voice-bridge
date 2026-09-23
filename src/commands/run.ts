@@ -19,7 +19,14 @@ export async function run(_args: string[]): Promise<number> {
     session_mode: cfg.session.mode,
     model: cfg.session.model,
     satellites: Object.keys(cfg.satellites).length,
+    follow_up_ms: cfg.conversation.followUpMs,
+    delegate: cfg.delegate.enabled ? cfg.delegate.model : 'disabled',
   });
+  if (cfg.conversation.followUpMs > 0 && cfg.session.mode !== 'warm') {
+    logger.warn('follow-ups are enabled but session.mode is per_utterance; every follow-up pays session setup', {
+      follow_up_ms: cfg.conversation.followUpMs,
+    });
+  }
   if (Object.keys(cfg.satellites).length === 0) {
     logger.info('no satellite sources configured yet — idling with a live HA connection (use `voicebridge text/say` for commands)');
   }
@@ -39,7 +46,12 @@ export async function run(_args: string[]): Promise<number> {
     satellites: cfg.satellites,
     logger,
     getEncryptionKey: (entryId) => haClient.getESPHomeEncryptionKey(entryId),
-    runCommand: (source) => runCommand(app, { kind: 'audio', source }),
+    runCommand: (source, opts) => runCommand(app, { kind: 'audio', source }, { followUpIndex: opts.followUpIndex }),
+    followUpMs: cfg.conversation.followUpMs,
+    maxFollowUps: cfg.conversation.maxFollowUps,
+    // A follow-up chain shares one conversation so "now dim it a bit" resolves
+    // against what just happened; that history is dropped once the chain ends.
+    onChainEnd: () => sessions.pruneConversation(),
   });
   try {
     await satelliteManager.start();

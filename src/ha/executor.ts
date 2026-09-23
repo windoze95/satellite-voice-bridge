@@ -45,6 +45,10 @@ const invalid = (domain: string, field: string): ServiceMapping => ({
 
 function lightData(light: LightOptions | null | undefined): Record<string, unknown> | null {
   if (!light) return {};
+  // A mood is rendered by policy/mood.ts into concrete per-light settings long
+  // before this point. One arriving here means that step was skipped, and
+  // silently dropping it would turn "set an intimate mood" into a bare turn_on.
+  if (light.mood !== null) return null;
   if ([light.rgb_color, light.color_temp_kelvin, light.effect].filter((value) => value !== null).length > 1) return null;
   if (light.brightness_pct !== null && light.brightness_step_pct !== null) return null;
   const data: Record<string, unknown> = {};

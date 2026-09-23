@@ -3,7 +3,9 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export type TKey = 't0' | 't1' | 't2' | 't3' | 't4' | 't5' | 't6' | 't7' | 't8';
+// t4a/t4b bracket a delegation: the fast model asked for help at t4a, the
+// strong model answered at t4b. They sit between t4 and t5 when present.
+export type TKey = 't0' | 't1' | 't2' | 't3' | 't4' | 't4a' | 't4b' | 't5' | 't6' | 't7' | 't8';
 
 export interface Usage {
   inputTextTokens: number;
@@ -18,6 +20,9 @@ export const MODEL_PRICES: Record<string, { textIn: number; cachedText: number; 
   'gpt-realtime-2.1-mini': { textIn: 0.6, cachedText: 0.06, textOut: 2.4, audioIn: 10, cachedAudio: 0.3 },
   'gpt-realtime-2.1': { textIn: 4, cachedText: 0.4, textOut: 24, audioIn: 32, cachedAudio: 0.4 },
 };
+// Delegate pricing is deliberately absent: an unverified rate in this table
+// would silently corrupt every cost figure downstream. Delegated commands log
+// their token counts and leave cost_usd covering the realtime model alone.
 
 export function estimateCostUsd(model: string, u: Usage): number | null {
   const p = MODEL_PRICES[model];
@@ -48,6 +53,8 @@ export interface DecisionSummary {
 export interface Deltas {
   session_setup?: number;
   model?: number;
+  /** Time spent waiting on the strong model, when this command delegated. */
+  delegate?: number;
   policy?: number;
   ha_ack?: number;
   confirm?: number;
@@ -73,6 +80,21 @@ export interface CommandRecord {
   cost_usd: number | null;
   ack?: string;
   error?: string;
+  /** The model's read of how it was said. Tune mood behavior from this column. */
+  tone?: string;
+  /** Set when the model judged this not to be a command. */
+  dismissed?: { reason: string; note?: string };
+  /** Set when the strong model planned this command. */
+  delegated?: { model: string; why: string; usage: DelegateTokens };
+  /** 0 for a wake-word command, 1+ for each follow-up in the same chain. */
+  follow_up_index?: number;
+}
+
+export interface DelegateTokens {
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
 }
 
 export class CommandTrace {
@@ -81,6 +103,10 @@ export class CommandTrace {
   transcript?: string;
   ack?: string;
   error?: string;
+  tone?: string;
+  dismissed?: { reason: string; note?: string };
+  delegated?: { model: string; why: string; usage: DelegateTokens };
+  followUpIndex?: number;
   outcome: Outcome = 'error';
   readonly functionCalls: Array<{ name: string; args: unknown }> = [];
   readonly decisions: DecisionSummary[] = [];
@@ -137,6 +163,7 @@ export class CommandTrace {
     return {
       session_setup: d('t0', 't1'),
       model: d('t3', 't4'),
+      delegate: d('t4a', 't4b'),
       policy: d('t4', 't5'),
       ha_ack: d('t6', 't7'),
       confirm: d('t7', 't8'),
@@ -164,6 +191,10 @@ export class CommandTrace {
       cost_usd: estimateCostUsd(this.model, this.usage),
       ack: this.ack,
       error: this.error,
+      tone: this.tone,
+      dismissed: this.dismissed,
+      delegated: this.delegated,
+      follow_up_index: this.followUpIndex,
     };
   }
 
@@ -178,6 +209,8 @@ export function summaryLine(rec: CommandRecord): string {
     const icon = rec.outcome === 'executed' || rec.outcome === 'dry_run' ? '✔' : rec.outcome === 'no_action' ? '–' : '✖';
     const spoken = rec.transcript ?? rec.utterance ?? '(no utterance)';
     const parts: string[] = [`${icon} ${JSON.stringify(spoken)}`];
+    if (rec.follow_up_index) parts.push(`(follow-up ${rec.follow_up_index})`);
+    if (rec.tone && rec.tone !== 'neutral') parts.push(`[${rec.tone}]`);
 
     const dec =
       rec.outcome === 'executed' || rec.outcome === 'dry_run'
@@ -189,6 +222,8 @@ export function summaryLine(rec: CommandRecord): string {
       parts.push(`→ ${ids}${verb ? ` ${verb}` : ''}${rec.outcome === 'dry_run' ? ' (dry-run)' : ''}`);
     } else if (dec) {
       parts.push(`refused (${dec.reason ?? 'policy'}: ${dec.message})`);
+    } else if (rec.dismissed) {
+      parts.push(`dismissed (${rec.dismissed.reason}${rec.dismissed.note ? `: ${rec.dismissed.note}` : ''})`);
     } else if (rec.outcome === 'no_action' && rec.ack) {
       parts.push(`→ "${rec.ack}"`);
     } else if (rec.error) {
@@ -206,6 +241,7 @@ export function summaryLine(rec: CommandRecord): string {
       parts.push(`| model ${d.model} ms`);
     }
 
+    if (rec.delegated) parts.push(`| via ${rec.delegated.model} ${rec.d.delegate ?? '?'} ms`);
     if (rec.cost_usd !== null) parts.push(`| $${rec.cost_usd.toFixed(4)}`);
     return parts.join(' ');
   }

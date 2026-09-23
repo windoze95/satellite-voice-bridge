@@ -13,6 +13,7 @@ const propose = (p: Partial<ProposedAction>): ProposedAction => ({
   area: null,
   value: null,
   light: null,
+  tone: 'neutral',
   ...p,
 });
 

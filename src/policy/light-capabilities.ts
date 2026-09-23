@@ -71,15 +71,15 @@ function supportedFeatures(cache: RegistryCache, entityId: string): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-function supportsBrightness(cache: RegistryCache, entityId: string): boolean {
+export function supportsBrightness(cache: RegistryCache, entityId: string): boolean {
   return colorModes(cache, entityId).some((mode) => mode !== 'onoff' && mode !== 'unknown');
 }
 
-function supportsColor(cache: RegistryCache, entityId: string): boolean {
+export function supportsColor(cache: RegistryCache, entityId: string): boolean {
   return colorModes(cache, entityId).some((mode) => COLOR_MODES.has(mode));
 }
 
-function supportsColorTemperature(cache: RegistryCache, entityId: string): boolean {
+export function supportsColorTemperature(cache: RegistryCache, entityId: string): boolean {
   const modes = colorModes(cache, entityId);
   return modes.includes('color_temp') || modes.some((mode) => COLOR_MODES.has(mode));
 }
@@ -124,7 +124,7 @@ function effectPlan(
   return exactEffectCohort(matches, requested);
 }
 
-function available(cache: RegistryCache, entityId: string): boolean {
+export function available(cache: RegistryCache, entityId: string): boolean {
   const state = cache.statesById.get(entityId)?.state;
   return state !== undefined && state !== 'unavailable' && state !== 'unknown';
 }
@@ -136,6 +136,14 @@ function numberAttribute(cache: RegistryCache, entityId: string, name: string, f
 
 function names(cache: RegistryCache, entityIds: string[]): string {
   return entityIds.map((id) => `${displayName(cache, id)} (${id})`).join(', ');
+}
+
+/** The Kelvin range one light accepts, using HA's documented defaults when unreported. */
+export function kelvinRange(cache: RegistryCache, entityId: string): { min: number; max: number } {
+  return {
+    min: numberAttribute(cache, entityId, 'min_color_temp_kelvin', DEFAULT_MIN_KELVIN),
+    max: numberAttribute(cache, entityId, 'max_color_temp_kelvin', DEFAULT_MAX_KELVIN),
+  };
 }
 
 /**

@@ -83,6 +83,7 @@ describe('warm session lifecycle', () => {
       apiKey: 'sk-test',
       model: 'gpt-realtime-2.1-mini',
       transcribe: false,
+      delegate: false,
       logger,
       maxAgeMs,
     });

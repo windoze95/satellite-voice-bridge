@@ -26,7 +26,11 @@ describe('control_device light settings', () => {
           effect: null,
           transition_seconds: 3,
           flash: 'short',
+          mood: null,
         },
+        // Absent tone defaults to neutral rather than failing the parse: a
+        // delegated proposal never carries one.
+        tone: 'neutral',
       },
     });
   });

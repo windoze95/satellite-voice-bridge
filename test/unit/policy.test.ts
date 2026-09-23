@@ -12,6 +12,7 @@ const propose = (p: Partial<ProposedAction>): ProposedAction => ({
   area: 'kitchen',
   value: null,
   light: null,
+  tone: 'neutral',
   ...p,
 });
 
@@ -20,14 +21,14 @@ describe('decide', () => {
     const d = decide(cache, TEST_POLICY, propose({}));
     expect(d.outcome).toBe('execute');
     expect(d.tier).toBe('green');
-    expect(d.resolved?.service).toBe('turn_on');
+    expect(d.calls[0]?.service).toBe('turn_on');
     expect(d.entityIds).toHaveLength(3);
   });
 
   it('dry_run resolves fully but does not execute', () => {
     const d = decide(cache, { ...TEST_POLICY, dryRun: true }, propose({}));
     expect(d.outcome).toBe('dry_run');
-    expect(d.resolved).toBeDefined();
+    expect(d.calls[0]).toBeDefined();
   });
 
   it('YELLOW without opt-in is refused', () => {
@@ -40,7 +41,7 @@ describe('decide', () => {
     const cfg = { ...TEST_POLICY, yellowAllow: ['lock.front_door'] };
     const d = decide(cache, cfg, propose({ domain: 'lock', action: 'lock', target: 'front door', area: null }));
     expect(d.outcome).toBe('execute');
-    expect(d.resolved?.service).toBe('lock');
+    expect(d.calls[0]?.service).toBe('lock');
   });
 
   it('collective commands on YELLOW are refused even when opted in', () => {
@@ -90,6 +91,7 @@ describe('decide', () => {
           rgb_color: [128, 0, 128],
           color_temp_kelvin: null,
           effect: null,
+          mood: null,
           transition_seconds: 3,
           flash: null,
         },
@@ -97,7 +99,7 @@ describe('decide', () => {
     );
 
     expect(d).toMatchObject({ outcome: 'execute', entityIds: ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink'] });
-    expect(d.resolved).toMatchObject({
+    expect(d.calls[0]).toMatchObject({
       service: 'turn_on',
       serviceData: { brightness_pct: 35, rgb_color: [128, 0, 128], transition: 3 },
     });
@@ -122,6 +124,7 @@ describe('decide', () => {
           rgb_color: null,
           color_temp_kelvin: null,
           effect: 'sparkle',
+          mood: null,
           transition_seconds: null,
           flash: null,
         },
@@ -129,7 +132,7 @@ describe('decide', () => {
     );
 
     expect(d).toMatchObject({ outcome: 'execute' });
-    expect(d.resolved?.serviceData).toEqual({ effect: 'sparkle' });
+    expect(d.calls[0]?.serviceData).toEqual({ effect: 'sparkle' });
   });
 
   it('rechecks the collective limit after a light group expands to leaf targets', () => {
@@ -171,6 +174,7 @@ describe('decide', () => {
           rgb_color: [255, 0, 0],
           color_temp_kelvin: null,
           effect: null,
+          mood: null,
           transition_seconds: null,
           flash: null,
         },
@@ -219,6 +223,7 @@ describe('decide', () => {
           rgb_color: [255, 0, 0],
           color_temp_kelvin: null,
           effect: null,
+          mood: null,
           transition_seconds: null,
           flash: null,
         },

@@ -21,6 +21,8 @@ export interface RealtimeClientOptions {
 export class RealtimeClient extends EventEmitter {
   readonly connectedAt = Date.now();
   private closed = false;
+  /** Conversation items this session has accumulated, oldest first. */
+  private readonly itemIds: string[] = [];
 
   private constructor(
     private readonly ws: WebSocket,
@@ -38,6 +40,10 @@ export class RealtimeClient extends EventEmitter {
       if (event.type === 'error') {
         const err = event as RealtimeErrorEvent;
         this.logger.warn('realtime: server error event', { code: err.error?.code, message: err.error?.message });
+      }
+      if (event.type === 'conversation.item.created') {
+        const id = (event as { item?: { id?: string } }).item?.id;
+        if (typeof id === 'string' && id.length > 0) this.itemIds.push(id);
       }
       this.emit('event', event);
     });
@@ -133,6 +139,31 @@ export class RealtimeClient extends EventEmitter {
         reject(err);
       }
     });
+  }
+
+  /**
+   * Forget everything said so far on a warm session.
+   *
+   * Retained history is what makes "now dim it a bit" work inside a follow-up
+   * chain, and a liability between unrelated wakes — a dismissed snatch of
+   * conversation would otherwise sit in context colouring the next command.
+   * Fire-and-forget by design: this runs after a chain ends, never on the
+   * latency path, and a failed delete is not worth failing a command over.
+   */
+  pruneConversation(): void {
+    if (!this.isOpen) {
+      this.itemIds.length = 0;
+      return;
+    }
+    const ids = this.itemIds.splice(0, this.itemIds.length);
+    for (const id of ids) {
+      try {
+        this.send({ type: 'conversation.item.delete', item_id: id });
+      } catch {
+        // The socket went away mid-prune; the session dies with its history.
+        return;
+      }
+    }
   }
 
   get isOpen(): boolean {

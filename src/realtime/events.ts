@@ -39,6 +39,7 @@ export type ClientEvent =
   | { type: 'input_audio_buffer.append'; audio: string }
   | { type: 'input_audio_buffer.commit' }
   | { type: 'conversation.item.create'; item: ConversationItem }
+  | { type: 'conversation.item.delete'; item_id: string }
   | { type: 'response.create'; response?: Record<string, unknown> };
 
 // ---------- server → client ----------

@@ -1,15 +1,21 @@
 // Orchestrator: one spoken/typed command through Realtime → policy → HA,
 // with T0–T8 telemetry. Everything meets here.
+//
+// The model is forced to choose a tool on every utterance — act, dismiss, or
+// hand off — so intent is decided once, out loud, by the only participant that
+// heard the audio. What remains here is authorization and execution, plus one
+// narrow transcript veto that can stop an action but can never start one.
 import type { AudioSource } from './audio/source.js';
 import type { Config, FlourishConfig } from './config.js';
 import { buildInstructions } from './context/house-context.js';
 import type { HAClient } from './ha/client.js';
 import { executeAction } from './ha/executor.js';
 import type { FlourishManager } from './ha/flourish-manager.js';
-import { displayName, type Registry } from './ha/registry.js';
+import { type Registry } from './ha/registry.js';
 import { matchFlourish, snapshotLights } from './policy/flourish.js';
 import type { Logger } from './logger.js';
 import type { RealtimeClient } from './realtime/client.js';
+import { delegateCommand } from './realtime/delegate.js';
 import {
   usageFromRaw,
   type FunctionCallArgumentsDone,
@@ -19,10 +25,16 @@ import {
   type TranscriptionCompleted,
 } from './realtime/events.js';
 import type { SessionManager } from './realtime/session.js';
-import { CONTROL_DEVICE_TOOL, parseControlDeviceArgs, type LightOptions } from './realtime/tools.js';
-import { decide } from './policy/engine.js';
+import {
+  parseControlDeviceArgs,
+  parseDelegateArgs,
+  parseDismissArgs,
+  type ProposedAction,
+  type Tone,
+} from './realtime/tools.js';
+import { decide, type Decision } from './policy/engine.js';
 import { normalize } from './policy/resolve.js';
-import { appendRecord, CommandTrace, type CommandRecord } from './telemetry.js';
+import { appendRecord, CommandTrace, type CommandRecord, type DecisionSummary } from './telemetry.js';
 
 export interface PipelineDeps {
   cfg: Config;
@@ -38,128 +50,23 @@ export type CommandInput =
   | { kind: 'text'; utterance: string; originArea?: string }
   | { kind: 'audio'; source: AudioSource };
 
+export interface RunCommandOptions {
+  dryRun?: boolean;
+  /** 0 for a wake-word command; 1+ for each follow-up on the same open mic. */
+  followUpIndex?: number;
+}
+
 const COMMAND_TIMEOUT_MS = 30_000;
 const NO_SPEECH_GRACE_MS = 5_000;
 const TRANSCRIPT_GRACE_MS = 750;
-const CHANGE_WORDS = new Set([
-  'activate',
-  'arm',
-  'blink',
-  'brighten',
-  'brighter',
-  'close',
-  'color',
-  'disarm',
-  'colour',
-  'darken',
-  'darker',
-  'dim',
-  'dimmer',
-  'flash',
-  'effect',
-  'lock',
-  'make',
-  'open',
-  'pause',
-  'play',
-  'set',
-  'start',
-  'stop',
-  'switch',
-  'temperature',
-  'toggle',
-  'turn',
-  'unlock',
-]);
-const IMPLIED_LIGHT_CHANGE_WORDS = new Set([
-  'clinical',
-  'cozy',
-  'erotic',
-  'erotica',
-  'gay',
-  'horny',
-  'party',
-  'romantic',
-  'sensual',
-  'sexy',
-  'sterile',
-  'sterilite',
-  'sterilites',
-  'sterilights',
-]);
-// Words that describe how the lights should LOOK. When one of these is spoken,
-// a light turn_on whose payload carries no visible setting is a model error
-// (it would change nothing on lights that are already on), never a valid answer.
-const APPEARANCE_WORDS = new Set([
-  'blue',
-  'bright',
-  'brighter',
-  'brightest',
-  'color',
-  'colorful',
-  'colour',
-  'colourful',
-  'cool',
-  'cooler',
-  'coolest',
-  'cyan',
-  'dark',
-  'darker',
-  'darkest',
-  'daylight',
-  'default',
-  'dim',
-  'dimmer',
-  'dimmest',
-  'green',
-  'magenta',
-  'neutral',
-  'normal',
-  'normalise',
-  'normalize',
-  'orange',
-  'pink',
-  'purple',
-  'red',
-  'regular',
-  'reset',
-  'restore',
-  'soft',
-  'standard',
-  'usual',
-  'warm',
-  'warmer',
-  'warmest',
-  'white',
-  'yellow',
-]);
-const DEVICE_WORDS = new Set([
-  // "alarm" is here so a RED-tier request still reaches the tier check and is
-  // refused as red_tier rather than silently as an unrecognised utterance.
-  'alarm',
-  'blind',
-  'blinds',
-  'bulb',
-  'bulbs',
-  'cover',
-  'covers',
-  'fan',
-  'fans',
-  'lamp',
-  'lamps',
-  'light',
-  'lights',
-  'lock',
-  'locks',
-  'scene',
-  'script',
-  'shade',
-  'shades',
-  'switch',
-  'switches',
-  'thermostat',
-  'tv',
-]);
+
+/**
+ * Policy refusals that mean "you were probably right, but you aimed badly".
+ * These are worth a second opinion from the strong model; a red-tier or
+ * not-opted-in refusal is a decision, not a near miss, and is never escalated.
+ */
+const ESCALATABLE_REASONS = new Set(['no_confident_match', 'ambiguous', 'no_devices_in_scope', 'unknown_area']);
+
 const NEGATION_WORDS = new Set(['dont', 'never']);
 const INFORMATION_QUESTION_PREFIXES = [
   'am i ',
@@ -186,6 +93,15 @@ function containsPhrase(text: string, phrase: string): boolean {
   return wanted.length > 0 && (` ${text} `.includes(` ${wanted} `) || text === wanted);
 }
 
+/**
+ * The one transcript check that survives, and it only ever says no.
+ *
+ * "Don't turn on the lights" and "should I turn them on?" are the two shapes
+ * where a model reaching for its one obvious tool does real damage, and they are
+ * cheap to spot in text. Everything else about whether an utterance was a
+ * command is the model's call now — this cannot suppress a good command, only
+ * stop a clearly inverted one.
+ */
 function blocksDeviceAction(utterance: string): boolean {
   const text = normalize(utterance);
   if (!text) return false;
@@ -198,40 +114,6 @@ function blocksDeviceAction(utterance: string): boolean {
     utterance.trim().endsWith('?') &&
     !['can you ', 'could you ', 'will you ', 'would you '].some((prefix) => text.startsWith(prefix))
   );
-}
-
-function hasImpliedLightingMood(utterance: string): boolean {
-  const words = new Set(normalize(utterance).split(' '));
-  return [...IMPLIED_LIGHT_CHANGE_WORDS].some((word) => words.has(word));
-}
-
-function requestsLightAppearance(utterance: string): boolean {
-  if (hasImpliedLightingMood(utterance)) return true;
-  const words = new Set(normalize(utterance).split(' '));
-  return [...APPEARANCE_WORDS].some((word) => words.has(word));
-}
-
-/** No visible setting at all (transition alone cannot satisfy an appearance request). */
-function lightAppearanceEmpty(light: LightOptions | null): boolean {
-  return (
-    !light ||
-    (light.brightness_pct === null &&
-      light.brightness_step_pct === null &&
-      light.rgb_color === null &&
-      light.color_temp_kelvin === null &&
-      light.effect === null &&
-      light.flash === null)
-  );
-}
-
-function hasExplicitOffIntent(utterance: string): boolean {
-  const text = ` ${normalize(utterance)} `;
-  return text.includes(' turn off ') || text.includes(' switch off ') || text.trimStart().startsWith('stop ');
-}
-
-function explicitlyRequestsScene(utterance: string, target: string): boolean {
-  const text = normalize(utterance);
-  return new Set(text.split(' ')).has('scene') && containsPhrase(text, target);
 }
 
 function areaForUtterance(
@@ -251,111 +133,6 @@ function areaForUtterance(
   }
   candidates.sort((a, b) => normalize(b.phrase).length - normalize(a.phrase).length);
   return candidates.find((candidate) => containsPhrase(text, candidate.phrase))?.value ?? originArea;
-}
-
-function lightMoodCorrectionTool(area: string): unknown {
-  const properties = CONTROL_DEVICE_TOOL.parameters.properties;
-  return {
-    ...CONTROL_DEVICE_TOOL,
-    description:
-      'Apply the user-requested visual mood to the area lights. Choose supported appearance settings from HOUSE.',
-    parameters: {
-      ...CONTROL_DEVICE_TOOL.parameters,
-      properties: {
-        ...properties,
-        action: { type: 'string', enum: ['turn_on'] },
-        domain: { type: 'string', enum: ['light'] },
-        target: { type: 'string', enum: ['lights'] },
-        light: {
-          ...properties.light,
-          type: 'object',
-          description: 'Required visual appearance chosen from the advertised HOUSE capabilities.',
-          anyOf: [
-            { required: ['brightness_pct'], properties: { brightness_pct: { type: 'number', minimum: 0, maximum: 100 } } },
-            {
-              required: ['rgb_color'],
-              properties: {
-                rgb_color: {
-                  type: 'array',
-                  items: { type: 'integer', minimum: 0, maximum: 255 },
-                  minItems: 3,
-                  maxItems: 3,
-                },
-              },
-            },
-            { required: ['color_temp_kelvin'], properties: { color_temp_kelvin: { type: 'number', minimum: 1 } } },
-            { required: ['effect'], properties: { effect: { type: 'string' } } },
-          ],
-        },
-        area: { type: 'string', enum: [area] },
-      },
-      required: [...CONTROL_DEVICE_TOOL.parameters.required, 'area', 'light'],
-    },
-  };
-}
-
-/**
- * Does the utterance mention anything controllable at all — an action, a device,
- * a room, or a mood?
- *
- * A wake word fires on ordinary conversation more often than anyone would like,
- * and the model, handed one tool and a sentence, reaches for the tool anyway:
- * "Excited and nervous, yeah." produced a clean turn_on of five lights. An
- * utterance naming no action, no device, no area and no mood is not a device
- * command whatever the model proposed. Deliberately generous — one hit anywhere
- * in this vocabulary is enough — so it only catches utterances that are plainly
- * not about the house.
- */
-function looksLikeDeviceCommand(
-  utterance: string,
-  cache: NonNullable<Registry['cache']>,
-  policyCfg: Config['policy'],
-): boolean {
-  const text = normalize(utterance);
-  if (!text) return false; // transcription ran and heard nothing intelligible
-  const words = new Set(text.split(' '));
-  if ([...CHANGE_WORDS].some((word) => words.has(word))) return true;
-  if ([...DEVICE_WORDS].some((word) => words.has(word))) return true;
-  if ([...APPEARANCE_WORDS].some((word) => words.has(word))) return true;
-  if (hasImpliedLightingMood(utterance)) return true;
-
-  const areaPhrases = [
-    ...[...cache.areasById.values()].flatMap((area) => [area.name, ...(area.aliases ?? [])]),
-    ...Object.keys(policyCfg.areaAliases),
-  ];
-  if (areaPhrases.some((phrase) => containsPhrase(text, phrase))) return true;
-  for (const entityId of cache.entitiesById.keys()) {
-    if (containsPhrase(text, displayName(cache, entityId))) return true;
-  }
-  return false;
-}
-
-function shouldRetryWithRequiredTool(
-  utterance: string,
-  cache: NonNullable<Registry['cache']>,
-  policyCfg: Config['policy'],
-  originArea?: string,
-): boolean {
-  const text = normalize(utterance);
-  if (!text) return false;
-  if (blocksDeviceAction(utterance)) return false;
-  const words = new Set(text.split(' '));
-  const hasChange = [...CHANGE_WORDS].some((word) => words.has(word));
-  const hasImpliedLightChange = hasImpliedLightingMood(utterance);
-  if (!hasChange && !hasImpliedLightChange) return false;
-  if ([...DEVICE_WORDS].some((word) => words.has(word))) return true;
-  if (hasImpliedLightChange && originArea) return true;
-
-  const areaPhrases = [
-    ...[...cache.areasById.values()].flatMap((area) => [area.name, ...(area.aliases ?? [])]),
-    ...Object.keys(policyCfg.areaAliases),
-  ];
-  if (areaPhrases.some((phrase) => containsPhrase(text, phrase))) return true;
-
-  for (const entityId of cache.entitiesById.keys()) {
-    if (containsPhrase(text, displayName(cache, entityId))) return true;
-  }
-  return false;
 }
 
 /**
@@ -394,17 +171,18 @@ async function executeFlourish(
     area,
     value: null,
     light: flourish.light,
+    tone: 'playful',
   });
   trace.mark('t5');
-  const summary = {
+  const call = decision.calls[0];
+  const summary: DecisionSummary = {
     outcome: decision.outcome,
     tier: decision.tier,
     reason: decision.reason,
     message: decision.message,
     entityIds: decision.entityIds,
-    service: decision.resolved?.service,
-    serviceData: decision.resolved?.serviceData,
-    verified: undefined as boolean | undefined,
+    service: call?.service,
+    serviceData: call?.serviceData,
   };
 
   if (decision.outcome === 'refuse') {
@@ -412,7 +190,7 @@ async function executeFlourish(
     trace.outcome = 'refused';
     return;
   }
-  if (decision.outcome === 'dry_run' || !decision.resolved) {
+  if (decision.outcome === 'dry_run' || !call) {
     trace.decisions.push(summary);
     trace.outcome = 'dry_run';
     return;
@@ -421,7 +199,7 @@ async function executeFlourish(
   // Snapshot before the flourish lands, or we would restore the flourish itself.
   const entityIds = decision.entityIds;
   const snapshots = deps.flourish.snapshot(() => snapshotLights(cache, entityIds), entityIds);
-  const result = await executeAction(deps.haClient, decision.resolved, trace);
+  const result = await executeAction(deps.haClient, call, trace);
   summary.verified = result.verified;
   trace.decisions.push(summary);
 
@@ -444,11 +222,16 @@ async function executeFlourish(
   });
 }
 
-export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: { dryRun?: boolean } = {}): Promise<CommandRecord> {
+export async function runCommand(
+  deps: PipelineDeps,
+  input: CommandInput,
+  opts: RunCommandOptions = {},
+): Promise<CommandRecord> {
   const { cfg, logger } = deps;
   const source = input.kind === 'audio' ? input.source : null;
   const trace = new CommandTrace(input.kind === 'text' ? 'text' : source!.kind, cfg.session.model, cfg.session.mode);
   if (input.kind === 'text') trace.utterance = input.utterance;
+  if (opts.followUpIndex) trace.followUpIndex = opts.followUpIndex;
   trace.mark('t0');
 
   const policyCfg = opts.dryRun ? { ...cfg.policy, dryRun: true } : cfg.policy;
@@ -459,6 +242,15 @@ export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: 
     // streaming merely because the command exited early.
     source?.stop();
     const rec = trace.finish();
+    // A follow-up window that closed in silence is not a command that failed;
+    // nobody said anything. Recording one would put an error row in the
+    // telemetry for every command that simply wasn't followed up.
+    if (source?.expired === true && !trace.has('t3')) {
+      rec.outcome = 'no_action';
+      rec.ok = true;
+      rec.error = undefined;
+      return rec;
+    }
     appendRecord(cfg.telemetry.jsonlPath, rec);
     logger.info('command finished', { cmd_id: rec.cmd_id, outcome: rec.outcome, error: rec.error, d: rec.d as unknown });
     return rec;
@@ -484,10 +276,7 @@ export async function runCommand(deps: PipelineDeps, input: CommandInput, opts: 
     }
   }
 
-  const baseInstructions = buildInstructions(cache, policyCfg);
-  const instructions = originArea
-    ? `${baseInstructions}\n\nThe device that heard this command is in: ${originArea}. When no area is stated, prefer devices there.`
-    : baseInstructions;
+  const instructions = buildInstructions(cache, policyCfg, originArea);
 
   let client: RealtimeClient;
   try {
@@ -533,14 +322,12 @@ function driveCommand(ctx: DriveContext): Promise<void> {
     let pendingExecutions = 0;
     let sawFunctionCall = false;
     let functionResponseDone = false;
-    let responsePhase: 'primary' | 'retry' | 'correction' | 'ack' = 'primary';
+    let responsePhase: 'primary' | 'ack' = 'primary';
     let ackRequested = false;
     let ackResponseDone = false;
-    let correctionWanted = false;
-    let correctionRequested = false;
-    let correctionArea: string | undefined;
     let waitingForTranscript = false;
     let flourishHandled = false;
+    let delegationUsed = false;
     let validFunctionCalls = 0;
     const malformedCallErrors: string[] = [];
     let currentText = '';
@@ -584,30 +371,6 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       if (validFunctionCalls === 0 && malformedCallErrors.length > 0 && !trace.error) {
         trace.error = `model sent bad function arguments: ${malformedCallErrors.join('; ')}`;
       }
-      // A correction re-targets ALL area lights; never fire one after another
-      // call in the same response already executed, or it would clobber that work.
-      if (correctionWanted && !correctionRequested && correctionArea && trace.outcome !== 'executed') {
-        correctionRequested = true;
-        responsePhase = 'correction';
-        sawFunctionCall = false;
-        functionResponseDone = false;
-        currentText = '';
-        try {
-          client.send({
-            type: 'response.create',
-            response: {
-              tool_choice: 'required',
-              tools: [lightMoodCorrectionTool(correctionArea)],
-              instructions:
-                `${instructions}\n\n` +
-                'Correct the previous rejected call. The user asked for a lighting appearance (a mood, style, restoration, or color), not a named scene or a bare power toggle. Call control_device with domain "light", target "lights", the canonical stated/origin area, and explicit supported appearance settings chosen from HOUSE. For "normal"/"normalize"/"regular", choose a neutral advertised color temperature with a moderate-to-high brightness_pct.',
-            },
-          });
-        } catch (err) {
-          fail(err instanceof Error ? err : new Error(String(err)));
-        }
-        return;
-      }
       if (ackWanted) {
         if (!ackRequested) {
           ackRequested = true;
@@ -625,35 +388,6 @@ function driveCommand(ctx: DriveContext): Promise<void> {
         if (ackResponseDone) complete();
         return;
       }
-      complete();
-    };
-
-    const finishNoToolResponse = (spoken: string | undefined): void => {
-      if (completed || flourishHandled) return;
-      if (
-        responsePhase === 'primary' &&
-        spoken &&
-        shouldRetryWithRequiredTool(spoken, cache, policyCfg, originArea)
-      ) {
-        responsePhase = 'retry';
-        currentText = '';
-        try {
-          client.send({
-            type: 'response.create',
-            response: {
-              tool_choice: 'required',
-              instructions:
-                `${instructions}\n\n` +
-                'The user made a clear, harmless smart-home change request. Call control_device now. If the user requested different colors or effects for each light, make one call per exact name on the AREA individual-light line and choose a different supported setting for every call. Otherwise, if the wording describes a lighting mood, control the stated area lights with domain "light" and target "lights"; do not invent or select a scene. Choose supported appearance settings from HOUSE.',
-            },
-          });
-        } catch (err) {
-          fail(err instanceof Error ? err : new Error(String(err)));
-        }
-        return;
-      }
-      trace.outcome = 'no_action';
-      trace.ack = currentText || undefined;
       complete();
     };
 
@@ -682,6 +416,249 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       return spoken;
     };
 
+    const respond = (callId: string, output: { ok: boolean; message: string; entities: string[] }): void => {
+      if (completed) return;
+      try {
+        client.send({
+          type: 'conversation.item.create',
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(output) },
+        });
+      } catch (err) {
+        // The action already ran or was refused; the model's copy of the result
+        // is a nicety, and a dead socket is reported by 'closed' anyway.
+        deps.logger.warn('function output send failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    };
+
+    /** Run every call in an authorized decision, recording each one. */
+    const applyDecision = async (decision: Decision): Promise<{ ok: boolean; message: string; entities: string[] }> => {
+      if (decision.outcome === 'refuse') {
+        if (trace.outcome === 'error') trace.outcome = 'refused';
+        trace.decisions.push({
+          outcome: 'refuse',
+          tier: decision.tier,
+          reason: decision.reason,
+          message: decision.message,
+          entityIds: decision.entityIds,
+        });
+        return { ok: false, message: decision.message, entities: [] };
+      }
+
+      if (decision.outcome === 'dry_run') {
+        for (const call of decision.calls) {
+          trace.decisions.push({
+            outcome: 'dry_run',
+            tier: decision.tier,
+            reason: decision.reason,
+            message: decision.message,
+            entityIds: call.entityIds,
+            service: call.service,
+            serviceData: call.serviceData,
+          });
+        }
+        if (trace.outcome !== 'executed') trace.outcome = 'dry_run';
+        return { ok: true, message: decision.message, entities: decision.entityIds };
+      }
+
+      // This command owns these lights now; a pending flourish restore would
+      // otherwise undo it seconds later.
+      deps.flourish.cancelFor(decision.entityIds);
+
+      let anyOk = false;
+      let lastError: string | undefined;
+      for (const call of decision.calls) {
+        const result = await executeAction(deps.haClient, call, trace);
+        if (completed) return { ok: false, message: 'command already finished', entities: [] };
+        trace.decisions.push({
+          outcome: 'execute',
+          tier: decision.tier,
+          reason: decision.reason,
+          message: decision.message,
+          entityIds: call.entityIds,
+          service: call.service,
+          serviceData: call.serviceData,
+          verified: result.verified,
+        });
+        if (result.ok) anyOk = true;
+        else lastError = result.error ?? 'Home Assistant call failed';
+      }
+
+      if (anyOk) {
+        trace.outcome = 'executed';
+        // A mood spans several calls; one failing bulb group should not erase
+        // the fact that the room changed.
+        if (lastError) deps.logger.warn('part of a multi-call command failed', { cmd_id: trace.cmdId, error: lastError });
+        return { ok: true, message: decision.message, entities: decision.entityIds };
+      }
+      trace.outcome = 'error';
+      trace.error = lastError ?? 'Home Assistant call failed';
+      return { ok: false, message: trace.error, entities: decision.entityIds };
+    };
+
+    /**
+     * Hand the utterance to the strong model and authorize whatever it plans.
+     * Reached when the fast model asked for help, or when policy refused
+     * something that looked like a near miss.
+     */
+    const runDelegation = async (
+      request: string,
+      why: string,
+      tone: Tone,
+    ): Promise<{ ok: boolean; message: string; entities: string[] }> => {
+      delegationUsed = true;
+      trace.mark('t4a');
+      const result = await delegateCommand({
+        cfg: deps.cfg.delegate,
+        url: deps.cfg.delegate.url,
+        apiKey: deps.cfg.openaiApiKey ?? '',
+        instructions,
+        request,
+        transcript: trace.transcript ?? trace.utterance,
+        tone,
+        originArea,
+        logger: deps.logger,
+      });
+      trace.mark('t4b');
+      if (completed) return { ok: false, message: 'command already finished', entities: [] };
+
+      if (!result.ok) {
+        trace.decisions.push({
+          outcome: 'refuse',
+          tier: 'unknown',
+          reason: 'delegate_failed',
+          message: result.error,
+          entityIds: [],
+        });
+        if (trace.outcome === 'error') trace.outcome = 'refused';
+        if (!trace.error) trace.error = result.error;
+        return { ok: false, message: result.error, entities: [] };
+      }
+
+      trace.delegated = {
+        model: result.model,
+        why,
+        usage: result.usage,
+      };
+      deps.logger.info('delegated command', {
+        cmd_id: trace.cmdId,
+        model: result.model,
+        calls: result.actions.length,
+        why,
+      });
+
+      if (result.actions.length === 0) {
+        const message = result.text ?? 'The stronger model proposed no device changes.';
+        trace.decisions.push({
+          outcome: 'refuse',
+          tier: 'unknown',
+          reason: 'delegate_no_action',
+          message,
+          entityIds: [],
+        });
+        if (trace.outcome === 'error') trace.outcome = 'no_action';
+        trace.ack = result.text ?? undefined;
+        return { ok: false, message, entities: [] };
+      }
+
+      const messages: string[] = [];
+      const entities: string[] = [];
+      let anyOk = false;
+      for (const action of result.actions) {
+        trace.functionCalls.push({ name: 'control_device', args: action });
+        const decision = decide(cache, policyCfg, action, originArea, { moodOverrides: deps.cfg.moods });
+        trace.mark('t5');
+        const output = await applyDecision(decision);
+        if (completed) break;
+        messages.push(output.message);
+        entities.push(...output.entities);
+        anyOk ||= output.ok;
+      }
+      return { ok: anyOk, message: messages.join(' | '), entities: [...new Set(entities)] };
+    };
+
+    const handleDismiss = async (event: FunctionCallArgumentsDone): Promise<void> => {
+      if (completed || flourishHandled) return;
+      trace.mark('t4');
+      const spoken = await commandTextForSafety();
+      if (completed || flourishHandled) return;
+      // The transcript can land after the call; a flourish phrase still wins,
+      // because those are exactly the phrasings a model tends to back away from.
+      if (maybeStartFlourish(spoken)) return;
+
+      const parsed = parseDismissArgs(event.arguments);
+      trace.mark('t5');
+      validFunctionCalls++;
+      if (!parsed.ok) {
+        // A malformed dismissal is still a dismissal: the model declined to act.
+        trace.functionCalls.push({ name: event.name, args: event.arguments });
+        trace.dismissed = { reason: 'unclear' };
+      } else {
+        trace.functionCalls.push({ name: event.name, args: parsed.dismiss });
+        trace.tone = parsed.dismiss.tone;
+        trace.dismissed = {
+          reason: parsed.dismiss.reason,
+          note: parsed.dismiss.note ?? undefined,
+        };
+      }
+      trace.outcome = 'no_action';
+      deps.logger.info('utterance dismissed', {
+        cmd_id: trace.cmdId,
+        reason: trace.dismissed.reason,
+        tone: trace.tone,
+      });
+      respond(event.call_id, { ok: true, message: 'No action taken.', entities: [] });
+    };
+
+    const handleDelegate = async (event: FunctionCallArgumentsDone): Promise<void> => {
+      if (completed || flourishHandled) return;
+      trace.mark('t4');
+      const spoken = await commandTextForSafety();
+      if (completed || flourishHandled) return;
+      if (maybeStartFlourish(spoken)) return;
+
+      const parsed = parseDelegateArgs(event.arguments);
+      if (!parsed.ok) {
+        trace.functionCalls.push({ name: event.name, args: event.arguments });
+        malformedCallErrors.push(parsed.error);
+        respond(event.call_id, { ok: false, message: `invalid arguments: ${parsed.error}`, entities: [] });
+        return;
+      }
+      validFunctionCalls++;
+      trace.functionCalls.push({ name: event.name, args: parsed.delegate });
+      trace.tone = parsed.delegate.tone;
+
+      if (spoken !== undefined && blocksDeviceAction(spoken)) {
+        trace.mark('t5');
+        trace.decisions.push({
+          outcome: 'refuse',
+          tier: 'unknown',
+          reason: 'not_an_action',
+          message: 'The utterance was a prohibition or informational question, not a device-change request.',
+          entityIds: [],
+        });
+        trace.outcome = 'refused';
+        respond(event.call_id, { ok: false, message: 'No action taken: that was not a device-change request.', entities: [] });
+        return;
+      }
+
+      if (!deps.cfg.delegate.enabled) {
+        trace.mark('t5');
+        trace.decisions.push({
+          outcome: 'refuse',
+          tier: 'unknown',
+          reason: 'delegate_disabled',
+          message: 'The model asked to delegate, but delegation is disabled in voicebridge.yaml',
+          entityIds: [],
+        });
+        trace.outcome = 'refused';
+        respond(event.call_id, { ok: false, message: 'Delegation is disabled.', entities: [] });
+        return;
+      }
+
+      const output = await runDelegation(parsed.delegate.request, parsed.delegate.why, parsed.delegate.tone);
+      respond(event.call_id, output);
+    };
+
     const handleCall = async (event: FunctionCallArgumentsDone): Promise<void> => {
       if (completed || flourishHandled) return;
       trace.mark('t4');
@@ -690,195 +667,95 @@ function driveCommand(ctx: DriveContext): Promise<void> {
       // The transcript can land after the call; this is the flourish's last
       // chance to take over before the model's proposal is acted on.
       if (maybeStartFlourish(spoken)) return;
-      // Both checks need a transcript. An undefined one means transcription
-      // never reported — unknown, not innocent, but refusing on it would break
-      // real commands whenever STT lags.
-      const notAnAction =
-        spoken !== undefined && blocksDeviceAction(spoken)
-          ? {
-              reason: 'not_an_action',
-              message: 'The utterance was a prohibition or informational question, not a device-change request.',
-            }
-          : spoken !== undefined && !looksLikeDeviceCommand(spoken, cache, policyCfg)
-            ? {
-                reason: 'not_a_command',
-                message: 'The utterance named no device, area, action or mood; a wake word most likely fired on ordinary speech.',
-              }
-            : undefined;
-      if (notAnAction) {
+
+      // Needs a transcript. An undefined one means transcription never
+      // reported — unknown, not innocent, but refusing on it would break real
+      // commands whenever STT lags.
+      if (spoken !== undefined && blocksDeviceAction(spoken)) {
         trace.mark('t5');
         trace.functionCalls.push({ name: event.name, args: event.arguments });
         trace.decisions.push({
           outcome: 'refuse',
           tier: 'unknown',
-          reason: notAnAction.reason,
-          message: notAnAction.message,
+          reason: 'not_an_action',
+          message: 'The utterance was a prohibition or informational question, not a device-change request.',
           entityIds: [],
         });
         trace.outcome = 'refused';
-        client.send({
-          type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: event.call_id,
-            output: JSON.stringify({
-              ok: false,
-              message: 'No action taken: the utterance did not request a device change.',
-              entities: [],
-            }),
-          },
+        respond(event.call_id, {
+          ok: false,
+          message: 'No action taken: the utterance did not request a device change.',
+          entities: [],
         });
         return;
       }
-      const parsed = parseControlDeviceArgs(event.arguments);
-      let output: { ok: boolean; message: string; entities: string[] };
 
+      const parsed = parseControlDeviceArgs(event.arguments);
       if (!parsed.ok) {
         trace.functionCalls.push({ name: event.name, args: event.arguments });
         trace.decisions.push({ outcome: 'refuse', tier: 'unknown', reason: 'bad_arguments', message: parsed.error, entityIds: [] });
         malformedCallErrors.push(parsed.error);
-        output = { ok: false, message: `invalid arguments: ${parsed.error}`, entities: [] };
-      } else {
-        validFunctionCalls++;
-        trace.functionCalls.push({ name: event.name, args: parsed.action });
-        if (
-          spoken &&
-          hasImpliedLightingMood(spoken) &&
-          !hasExplicitOffIntent(spoken) &&
-          parsed.action.domain === 'scene' &&
-          !explicitlyRequestsScene(spoken, parsed.action.target)
-        ) {
-          correctionArea = areaForUtterance(spoken, cache, policyCfg, originArea);
-          correctionWanted = correctionArea !== undefined;
-          trace.mark('t5');
-          trace.decisions.push({
-            outcome: 'refuse',
-            tier: 'green',
-            reason: 'mood_requires_light_settings',
-            message: 'Visual lighting moods must be expressed as light appearance settings, not an arbitrary named scene.',
-            entityIds: [],
-          });
-          if (trace.outcome !== 'executed') trace.outcome = 'refused';
-          client.send({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: event.call_id,
-              output: JSON.stringify({
-                ok: false,
-                message: correctionWanted
-                  ? 'That call treated a visual lighting mood as a named scene. Retry using domain light, target lights, the canonical area, and supported appearance settings from HOUSE.'
-                  : 'No action taken: the visual lighting mood did not include a safely resolvable area.',
-                entities: [],
-              }),
-            },
-          });
-          return;
-        }
-        if (
-          spoken &&
-          !correctionRequested &&
-          parsed.action.domain === 'light' &&
-          parsed.action.action === 'turn_on' &&
-          lightAppearanceEmpty(parsed.action.light) &&
-          requestsLightAppearance(spoken) &&
-          !hasExplicitOffIntent(spoken)
-        ) {
-          correctionArea = areaForUtterance(spoken, cache, policyCfg, originArea);
-          correctionWanted = correctionArea !== undefined;
-          trace.mark('t5');
-          trace.decisions.push({
-            outcome: 'refuse',
-            tier: 'green',
-            reason: 'appearance_requires_light_settings',
-            message: 'The utterance asked for a lighting appearance, but the call carried no light settings; a bare turn_on would change nothing.',
-            entityIds: [],
-          });
-          if (trace.outcome !== 'executed') trace.outcome = 'refused';
-          client.send({
-            type: 'conversation.item.create',
-            item: {
-              type: 'function_call_output',
-              call_id: event.call_id,
-              output: JSON.stringify({
-                ok: false,
-                message: correctionWanted
-                  ? 'That turn_on carried no light settings, but the user asked how the lights should look. Retry with explicit supported appearance settings from HOUSE (for "normal"/"normalize": a neutral color temperature with a moderate-to-high brightness_pct).'
-                  : 'No action taken: the lighting appearance request did not include a safely resolvable area.',
-                entities: [],
-              }),
-            },
-          });
-          return;
-        }
-        const decision = decide(cache, policyCfg, parsed.action, originArea);
-        if (
-          spoken &&
-          !correctionRequested &&
-          hasImpliedLightingMood(spoken) &&
-          !hasExplicitOffIntent(spoken) &&
-          (parsed.action.domain === 'scene' || parsed.action.domain === 'light') &&
-          !(parsed.action.domain === 'scene' && explicitlyRequestsScene(spoken, parsed.action.target)) &&
-          decision.outcome === 'refuse' &&
-          (decision.reason === 'no_confident_match' || decision.reason === 'no_devices_in_scope')
-        ) {
-          correctionArea = areaForUtterance(spoken, cache, policyCfg, originArea);
-          correctionWanted = correctionArea !== undefined;
-        }
-        trace.mark('t5');
-        const summary = {
-          outcome: decision.outcome,
+        respond(event.call_id, { ok: false, message: `invalid arguments: ${parsed.error}`, entities: [] });
+        return;
+      }
+
+      validFunctionCalls++;
+      const action: ProposedAction = parsed.action;
+      trace.functionCalls.push({ name: event.name, args: action });
+      if (!trace.tone) trace.tone = action.tone;
+
+      const decision = decide(cache, policyCfg, action, originArea, { moodOverrides: deps.cfg.moods });
+      trace.mark('t5');
+
+      // A near-miss refusal is worth a better model rather than a second guess
+      // from the same one. Only ever once per command.
+      if (
+        decision.outcome === 'refuse' &&
+        decision.reason !== undefined &&
+        ESCALATABLE_REASONS.has(decision.reason) &&
+        deps.cfg.delegate.enabled &&
+        !delegationUsed
+      ) {
+        deps.logger.info('escalating refused command', {
+          cmd_id: trace.cmdId,
+          reason: decision.reason,
+        });
+        trace.decisions.push({
+          outcome: 'refuse',
           tier: decision.tier,
           reason: decision.reason,
           message: decision.message,
           entityIds: decision.entityIds,
-          service: decision.resolved?.service,
-          serviceData: decision.resolved?.serviceData,
-          verified: undefined as boolean | undefined,
-        };
-        if (decision.outcome === 'execute' && decision.resolved) {
-          // This command owns these lights now; a pending flourish restore would
-          // otherwise undo it seconds later.
-          deps.flourish.cancelFor(decision.entityIds);
-          const result = await executeAction(deps.haClient, decision.resolved, trace);
-          if (completed) return; // command already failed/finished; leave the record alone
-          summary.verified = result.verified;
-          if (result.ok) {
-            trace.outcome = 'executed';
-            output = { ok: true, message: decision.message, entities: decision.entityIds };
-          } else {
-            trace.outcome = 'error';
-            trace.error = result.error ?? 'Home Assistant call failed';
-            output = { ok: false, message: trace.error, entities: decision.entityIds };
-          }
-        } else if (decision.outcome === 'dry_run') {
-          if (trace.outcome !== 'executed') trace.outcome = 'dry_run';
-          output = { ok: true, message: decision.message, entities: decision.entityIds };
-        } else {
-          if (trace.outcome === 'error') trace.outcome = 'refused';
-          output = {
-            ok: false,
-            message: correctionWanted
-              ? 'That call treated a visual lighting mood as a named scene or device. Retry using domain light, target lights, the canonical area, and supported appearance settings from HOUSE.'
-              : decision.message,
-            entities: [],
-          };
-        }
-        trace.decisions.push(summary);
-        deps.logger.info('policy decision', {
-          cmd_id: trace.cmdId,
-          outcome: decision.outcome,
-          tier: decision.tier,
-          reason: decision.reason,
-          entities: decision.entityIds,
         });
+        const output = await runDelegation(
+          spoken ?? `${action.action} ${action.target}${action.area ? ` in ${action.area}` : ''}`,
+          `the fast model's call was refused: ${decision.reason}`,
+          action.tone,
+        );
+        respond(event.call_id, output);
+        return;
       }
 
-      if (completed) return;
-      client.send({
-        type: 'conversation.item.create',
-        item: { type: 'function_call_output', call_id: event.call_id, output: JSON.stringify(output) },
+      const output = await applyDecision(decision);
+      deps.logger.info('policy decision', {
+        cmd_id: trace.cmdId,
+        outcome: decision.outcome,
+        tier: decision.tier,
+        reason: decision.reason,
+        entities: decision.entityIds,
       });
+      respond(event.call_id, output);
+    };
+
+    const dispatch = (event: FunctionCallArgumentsDone): Promise<void> => {
+      switch (event.name) {
+        case 'dismiss':
+          return handleDismiss(event);
+        case 'delegate':
+          return handleDelegate(event);
+        default:
+          return handleCall(event);
+      }
     };
 
     const onEvent = (event: ServerEvent): void => {
@@ -901,7 +778,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           }
           if (waitingForTranscript) {
             waitingForTranscript = false;
-            finishNoToolResponse(trace.transcript);
+            finishNoToolResponse();
           }
           return;
         case 'response.function_call_arguments.done':
@@ -914,7 +791,7 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           sawFunctionCall = true;
           pendingExecutions++;
           executionChain = executionChain
-            .then(() => handleCall(event as FunctionCallArgumentsDone))
+            .then(() => dispatch(event as FunctionCallArgumentsDone))
             .catch((err: unknown) => fail(err instanceof Error ? err : new Error(String(err))))
             .finally(() => {
               pendingExecutions--;
@@ -945,16 +822,17 @@ function driveCommand(ctx: DriveContext): Promise<void> {
 
           if (!sawFunctionCall) {
             const spoken = input.kind === 'text' ? input.utterance : trace.transcript;
-            if (input.kind === 'audio' && responsePhase === 'primary' && !spoken) {
+            if (input.kind === 'audio' && !spoken) {
               waitingForTranscript = true;
               timers.push(setTimeout(() => {
                 if (!waitingForTranscript || completed) return;
                 waitingForTranscript = false;
-                finishNoToolResponse(undefined);
+                finishNoToolResponse();
               }, TRANSCRIPT_GRACE_MS));
               return;
             }
-            finishNoToolResponse(spoken);
+            if (maybeStartFlourish(spoken)) return;
+            finishNoToolResponse();
             return;
           }
 
@@ -971,6 +849,20 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           return;
       }
     };
+
+    /**
+     * The model answered with prose despite tool_choice "required" — or the
+     * response carried nothing at all. Treated as a dismissal so the record and
+     * the follow-up window agree that nothing happened.
+     */
+    function finishNoToolResponse(): void {
+      if (completed || flourishHandled) return;
+      trace.outcome = 'no_action';
+      trace.ack = currentText || undefined;
+      if (!trace.dismissed) trace.dismissed = { reason: 'unclear', note: currentText || undefined };
+      complete();
+    }
+
     const onClosed = (): void => {
       fail(new Error('realtime connection closed mid-command'));
     };
@@ -994,6 +886,12 @@ function driveCommand(ctx: DriveContext): Promise<void> {
           }
           // Source exhausted: if server VAD never saw an end of speech, don't hang.
           if (!completed && !trace.has('t3')) {
+            // An expired follow-up window has nothing in flight; waiting out the
+            // grace period would just hold the satellite's mic open in silence.
+            if (input.source.expired === true) {
+              fail(new Error('follow-up window closed without speech'));
+              return;
+            }
             timers.push(setTimeout(() => {
               if (!trace.has('t3')) fail(new Error('no speech detected in audio'));
             }, NO_SPEECH_GRACE_MS));

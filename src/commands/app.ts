@@ -49,6 +49,7 @@ export async function createApp(opts: { retryHA: boolean; logFile?: boolean }): 
     apiKey: cfg.openaiApiKey!,
     model: cfg.session.model,
     transcribe: cfg.session.transcribeInput,
+    delegate: cfg.delegate.enabled,
     logger,
   });
 

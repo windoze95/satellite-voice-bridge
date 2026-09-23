@@ -42,8 +42,14 @@ export interface SatelliteManagerOptions {
   satellites: Record<string, SatelliteConfig>;
   logger: Logger;
   getEncryptionKey: (entryId: string) => Promise<string>;
-  runCommand: (source: SatelliteAudioSource) => Promise<CommandRecord>;
+  runCommand: (source: SatelliteAudioSource, opts: { followUpIndex: number }) => Promise<CommandRecord>;
   openClient?: OpenSatelliteClient;
+  /** How long to keep listening after a command. 0 disables follow-ups. */
+  followUpMs?: number;
+  /** Ceiling on chained follow-ups, so a noisy room cannot hold the mic open. */
+  maxFollowUps?: number;
+  /** Called when a follow-up chain ends, to drop its conversation history. */
+  onChainEnd?: () => void;
 }
 
 interface Connection {
@@ -56,9 +62,21 @@ interface Connection {
 interface ActiveRun {
   satelliteId: string;
   api: VoiceAssistantApiLike;
-  source: SatelliteAudioSource;
+  /** The turn currently consuming audio; null between turns. */
+  current: SatelliteAudioSource | null;
+  /**
+   * Audio that arrived while no turn was consuming it — during the second or so
+   * a command takes to execute. Without this, a follow-up spoken promptly after
+   * the lights move would lose its opening syllables.
+   */
+  pending: Buffer[];
+  pendingBytes: number;
+  turnIndex: number;
   done: Promise<void>;
 }
+
+/** ~3 s of 16 kHz PCM16 mono: long enough to bridge a command, bounded so a silent room cannot grow it. */
+const MAX_PENDING_BYTES = 96_000;
 
 /** Owns the exclusive ESPHome voice-assistant subscription for all configured satellites. */
 export class SatelliteManager {
@@ -81,7 +99,7 @@ export class SatelliteManager {
   async stop(): Promise<void> {
     if (this.stopping) return;
     this.stopping = true;
-    this.active?.source.fail(new Error('voicebridge is shutting down'));
+    this.active?.current?.fail(new Error('voicebridge is shutting down'));
 
     for (const connection of this.connections) {
       connection.abort.abort();
@@ -135,7 +153,7 @@ export class SatelliteManager {
       for await (const request of api.requests({ signal: connection.abort.signal })) {
         if (request.start) this.beginRun(connection.id, api);
         else if (this.active?.satelliteId === connection.id) {
-          this.active.source.fail(new Error('Satellite cancelled the active voice request'));
+          this.active.current?.fail(new Error('Satellite cancelled the active voice request'));
         }
       }
     } catch (err) {
@@ -148,8 +166,19 @@ export class SatelliteManager {
       for await (const chunk of connection.client.voiceAssistant.audio({ signal: connection.abort.signal })) {
         const active = this.active;
         if (!active || active.satelliteId !== connection.id) continue;
-        active.source.push(chunk.data);
-        if (chunk.end) active.source.end();
+        const turn = active.current;
+        if (turn?.accepting === true) {
+          turn.push(chunk.data);
+          if (chunk.end) turn.end();
+          continue;
+        }
+        // Between turns: hold the audio for whichever turn opens next, dropping
+        // the oldest first so a long silence cannot grow this without bound.
+        active.pending.push(chunk.data);
+        active.pendingBytes += chunk.data.length;
+        while (active.pendingBytes > MAX_PENDING_BYTES && active.pending.length > 0) {
+          active.pendingBytes -= active.pending.shift()!.length;
+        }
       }
     } catch (err) {
       if (!connection.abort.signal.aborted) this.handleConnectionFailure(connection.id, err);
@@ -180,45 +209,142 @@ export class SatelliteManager {
       return;
     }
 
-    const source = new SatelliteAudioSource(satelliteId, {
-      onSpeechStarted: () => this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.STT_VAD_START)),
-      onStop: () => this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.STT_VAD_END)),
-    });
-    const active: ActiveRun = { satelliteId, api, source, done: Promise.resolve() };
+    const active: ActiveRun = {
+      satelliteId,
+      api,
+      current: null,
+      pending: [],
+      pendingBytes: 0,
+      turnIndex: 0,
+      done: Promise.resolve(),
+    };
     this.active = active;
 
     this.sendSafe(api, () => api.respondToRequest());
     this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.RUN_START));
     this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.STT_START));
 
-    active.done = this.finishRun(active);
+    active.done = this.driveRun(active);
   }
 
-  private async finishRun(active: ActiveRun): Promise<void> {
+  /**
+   * One wake word, one or more utterances.
+   *
+   * The ESPHome run is deliberately left open after a command: the device stops
+   * streaming when it receives STT_VAD_END, so withholding that event is what
+   * keeps the microphone live for a follow-up. The run ends — and only then does
+   * the device hear STT_VAD_END and RUN_END — when nobody speaks inside the
+   * window, when the model judges what it heard to be ordinary conversation,
+   * when a command fails, or when the chain hits its cap.
+   */
+  private async driveRun(active: ActiveRun): Promise<void> {
+    const followUpMs = this.opts.followUpMs ?? 0;
+    const maxFollowUps = this.opts.maxFollowUps ?? 0;
+
     try {
-      const record = await this.opts.runCommand(active.source);
-      if (record.transcript) {
-        const data: VoiceAssistantEventData[] = [{ name: 'text', value: record.transcript.slice(0, 500) }];
-        this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.STT_END, data));
-      }
-      if (record.error || record.outcome === 'error') {
-        this.sendError(active.api, record.error ?? 'Voice command failed');
-      } else {
-        this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.INTENT_START));
-        this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.INTENT_END));
-        this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.RUN_END));
+      for (;;) {
+        const source = this.openTurn(active);
+        // Only a follow-up gets a deadline; the first utterance after a wake
+        // word is already bounded by the pipeline's own no-speech grace.
+        const deadline =
+          active.turnIndex > 0 && followUpMs > 0
+            ? setTimeout(() => source.expire(), followUpMs)
+            : null;
+        deadline?.unref?.();
+
+        let record: CommandRecord;
+        try {
+          record = await this.opts.runCommand(source, { followUpIndex: active.turnIndex });
+        } finally {
+          if (deadline) clearTimeout(deadline);
+          if (active.current === source) active.current = null;
+        }
+
+        const windowExpired = source.expired && !source.speechDetected;
+        if (!windowExpired) this.reportTurn(active, record);
+
+        if (
+          this.stopping ||
+          windowExpired ||
+          followUpMs <= 0 ||
+          active.turnIndex >= maxFollowUps ||
+          !this.invitesFollowUp(record)
+        ) {
+          break;
+        }
+        active.turnIndex++;
+        this.opts.logger.debug('listening for a follow-up', {
+          satellite: active.satelliteId,
+          follow_up: active.turnIndex,
+          window_ms: followUpMs,
+        });
       }
     } catch (err) {
-      active.source.stop();
+      active.current?.stop();
       this.sendError(active.api, err instanceof Error ? err.message : String(err));
-    } finally {
-      if (this.active === active) this.active = null;
+      this.finishRun(active);
+      return;
     }
+
+    // Ends the chain: the device closes its microphone here and not before.
+    this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.STT_VAD_END));
+    this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.RUN_END));
+    this.finishRun(active);
+  }
+
+  private finishRun(active: ActiveRun): void {
+    active.pending.length = 0;
+    active.pendingBytes = 0;
+    if (this.active === active) this.active = null;
+    // Retained history is what let "now dim it a bit" work; it has no business
+    // colouring the next person who says the wake word.
+    this.opts.onChainEnd?.();
+  }
+
+  /** A fresh turn on the same open run, primed with anything heard in between. */
+  private openTurn(active: ActiveRun): SatelliteAudioSource {
+    const source = new SatelliteAudioSource(active.satelliteId, {
+      onSpeechStarted: () => this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.STT_VAD_START)),
+      // Deliberately does NOT send STT_VAD_END: that is the event that makes the
+      // device stop its microphone, and it belongs to the end of the chain.
+      onStop: () => undefined,
+    });
+    active.current = source;
+    for (const chunk of active.pending) source.push(chunk);
+    active.pending.length = 0;
+    active.pendingBytes = 0;
+    return source;
+  }
+
+  /** Report one turn's outcome on the ESPHome pipeline-progress channel. */
+  private reportTurn(active: ActiveRun, record: CommandRecord): void {
+    if (record.transcript) {
+      const data: VoiceAssistantEventData[] = [{ name: 'text', value: record.transcript.slice(0, 500) }];
+      this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.STT_END, data));
+    }
+    if (record.error || record.outcome === 'error') {
+      this.sendErrorEvent(active.api, record.error ?? 'Voice command failed');
+      return;
+    }
+    this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.INTENT_START));
+    this.sendSafe(active.api, () => active.api.sendEvent(VoiceAssistantEvent.INTENT_END));
+  }
+
+  /**
+   * Whether to keep the microphone open after this turn.
+   *
+   * Only a command that actually did something earns a follow-up. A dismissal
+   * means the model decided it was overhearing the room, and continuing to
+   * listen is exactly the wrong response to that.
+   */
+  private invitesFollowUp(record: CommandRecord): boolean {
+    if (record.dismissed) return false;
+    return record.outcome === 'executed' || record.outcome === 'dry_run';
   }
 
   private handleConnectionFailure(satelliteId: string, err: unknown): void {
     if (this.active?.satelliteId === satelliteId) {
-      this.active.source.fail(new Error('Satellite connection closed during the voice request'));
+      this.active.current?.fail(new Error('Satellite connection closed during the voice request'));
     }
     this.opts.logger.warn('satellite stream closed', {
       satellite: satelliteId,
@@ -231,12 +357,19 @@ export class SatelliteManager {
     this.sendError(api, message, 'voicebridge_busy');
   }
 
-  private sendError(api: VoiceAssistantApiLike, message: string, code = 'voicebridge_error'): void {
+  /** Report an error mid-chain, leaving the run open. */
+  private sendErrorEvent(api: VoiceAssistantApiLike, message: string, code = 'voicebridge_error'): void {
     const data: VoiceAssistantEventData[] = [
       { name: 'code', value: code },
       { name: 'message', value: message.slice(0, 200) },
     ];
     this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.ERROR, data));
+  }
+
+  /** Report an error AND end the run: the microphone closes here. */
+  private sendError(api: VoiceAssistantApiLike, message: string, code = 'voicebridge_error'): void {
+    this.sendErrorEvent(api, message, code);
+    this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.STT_VAD_END));
     this.sendSafe(api, () => api.sendEvent(VoiceAssistantEvent.RUN_END));
   }
 

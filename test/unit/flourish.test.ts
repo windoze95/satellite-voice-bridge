@@ -13,6 +13,7 @@ const RAINBOW: FlourishConfig = {
     rgb_color: null,
     color_temp_kelvin: null,
     effect: 'prism',
+    mood: null,
     transition_seconds: null,
     flash: null,
   },

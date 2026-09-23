@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildHouseMap, buildInstructions } from '../../src/context/house-context.js';
+import { MOODS } from '../../src/realtime/tools.js';
 import { buildFixtureCache, TEST_POLICY } from '../mocks/fixture-cache.js';
 
 const cache = buildFixtureCache();
@@ -173,53 +174,47 @@ describe('buildInstructions', () => {
     expect(text).not.toContain('heard this command');
   });
 
-  it('gives compact operational guidance for light appearance controls', () => {
+  it('names every tool the session advertises', () => {
     const text = buildInstructions(cache, TEST_POLICY);
 
-    expect(text).toContain('Brightness, RGB color, color temperature, or effect imply action "turn_on"');
-    expect(text).toContain('Use this short procedure immediately');
-    expect(text).toContain('Do not deliberate over multiple equally safe appearance choices');
-    expect(text).toContain('Transition and flash preserve an explicit requested "turn_on" or "turn_off" action');
-    expect(text).toContain('light.effect, light.rgb_color, and light.color_temp_kelvin are mutually exclusive');
-    expect(text).toContain('light.brightness_pct and light.brightness_step_pct are mutually exclusive');
-    expect(text).toContain('Treat natural lighting moods and styles');
-    expect(text).toContain('"party time", "cozy", "romantic", or irreverent/adult slang');
-    expect(text).toContain('Never moralize about or refuse a harmless lighting command because of its wording');
-    expect(text).toContain('If the user explicitly asks for a different color on each light');
-    expect(text).toContain('make one control_device call per name on that AREA\'s "individual RGB lights" line');
-    expect(text).toContain('Multiple calls are required; never claim this is unsupported');
-    expect(text).toContain(
-      'choose exactly one of an advertised effect, RGB color, or color temperature, optionally with brightness',
-    );
-    expect(text).toContain('Never put a mood word in light.effect unless that exact effect is advertised');
-    expect(text).toContain('Choosing among multiple suitable safe appearances is your judgment, is NOT ambiguity');
-    expect(text).toContain('red=[255,0,0]');
-    expect(text).toContain('purple=[128,0,255]');
-    expect(text).toContain('convert its conventional sRGB value to light.rgb_color');
-    expect(text).toContain('When the object being turned off is the lights/device, use action "turn_off"');
-    expect(text).toContain('A prohibition such as "don\'t turn on the lights" is not a request to turn them off');
-    expect(text).toContain('Polite directives such as "can/could/would you turn them on?" are actions');
-    expect(text).toContain('When the object is an effect');
-    expect(text).toContain('action "turn_on" and light.effect="off"');
-    expect(text).toContain(
-      'Use light null unless transition or flash was explicitly requested, in which case include only those requested modifiers',
-    );
-    expect(text).toContain('warm=2700, soft=3000, neutral=4000, cool=5000, daylight=6500');
-    expect(text).toContain('"sterile" or "clinical" lighting means bright white');
-    expect(text).toContain('light.brightness_pct=100 with light.color_temp_kelvin=6500');
-    expect(text).toContain('Treat the fused transcription "sterilites" as "sterile lights"');
-    expect(text).toContain('An absolute light percentage is light.brightness_pct');
-    expect(text).toContain('Relative "brighter" uses a positive light.brightness_step_pct');
-    expect(text).toContain('"dimmer" or "darker" uses a negative one');
-    expect(text).toContain('"over/in N seconds" is light.transition_seconds=N');
-    expect(text).toContain('light.flash="short"');
-    expect(text).toContain('"turn off the effect" and "stop the effect" mean light.effect="off"');
-    expect(text).toContain('"normal", "normalize", "back to normal", "regular", "reset", or "restore"');
-    expect(text).toContain('it is an appearance request, never a bare power command');
-    expect(text).toContain('Never answer it with action "turn_on" and light null');
-    expect(text).toContain('"make it dark" means action "turn_off"');
-    expect(text).toContain('But never ask a question: replies are logged, never spoken');
-    expect(text).toContain('choose reasonable supported values and act');
+    expect(text).toContain('control_device');
+    expect(text).toContain('dismiss');
+    expect(text).toContain('delegate');
+    // Nothing is ever spoken, so the model must not treat a reply as an answer
+    // or ask a question nobody can hear.
+    expect(text).toContain('never by talking');
+    expect(text).toContain('never ask a question');
+  });
+
+  it('asks for tone from the delivery rather than the words', () => {
+    const text = buildInstructions(cache, TEST_POLICY);
+
+    expect(text).toContain('Set tone on every call from HOW it was said');
+    expect(text).toContain('not from the words');
+    // The hint-taking instruction is what replaced the verb allow-list.
+    expect(text).toContain('Take the hint');
+    expect(text).toContain('"Hit the lights"');
+  });
+
+  it('offers every mood the composer can actually render', () => {
+    const text = buildInstructions(cache, TEST_POLICY);
+
+    // If a mood is added to the enum but not the prompt, the model can never
+    // choose it; if it is named here but removed from the enum, every call
+    // using it is rejected. Pin them together.
+    for (const mood of MOODS) expect(text).toContain(mood);
+    expect(text).toContain('light.mood is mutually exclusive with rgb_color, color_temp_kelvin, and effect');
+  });
+
+  it('keeps the model from moralizing about how a request was worded', () => {
+    const text = buildInstructions(cache, TEST_POLICY);
+
+    expect(text).toContain('including irreverent or adult wording');
+    expect(text).toContain('Never moralize');
+    expect(text).toContain('never refuse a harmless lighting request over its wording');
+    // Authorization is the bridge's job; a model that self-censors produces no
+    // function call for the policy engine to refuse and log.
+    expect(text).toContain('Refusals are not yours to make');
   });
 
   it('instructs the model to accept area aliases and treat area lights as a collective', () => {
@@ -229,11 +224,13 @@ describe('buildInstructions', () => {
     });
 
     expect(text).toContain('AREA: Living Room\n  aliases: office\n');
-    expect(text).toContain('lists valid spoken aliases for the canonical name');
-    expect(text).toContain('set area to only that canonical AREA name');
-    expect(text).toContain('Never include "aliases:" text or an alias annotation in the area value');
-    expect(text).toContain('call control_device with target "lights" and the canonical AREA name');
-    expect(text).toContain('Do not select a similarly named device/group or refuse a listed area alias');
+    expect(text).toContain('lists the spoken aliases for the canonical name');
+    expect(text).toContain('Set area to the canonical AREA name exactly as written');
+    expect(text).toContain('never put alias text in the area value');
+    expect(text).toContain('pass the alias through unchanged');
+    expect(text).toContain('means all lights in that area');
+    expect(text).toContain('Do not substitute a similarly named device or group');
+    expect(text).toContain('rather than inventing a device, area, or scene');
   });
 
   it('adds the origin-room line when provided', () => {

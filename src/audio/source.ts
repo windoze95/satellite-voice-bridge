@@ -13,6 +13,12 @@ export interface AudioSource {
   frames(): AsyncIterable<Buffer>;
   /** Notify live sources when Realtime VAD first detects speech. */
   speechStarted?(): void;
+  /**
+   * True when a follow-up listening window closed with nothing said. Nobody
+   * spoke, so there is no command here to refuse, record, or report — the
+   * pipeline ends immediately and writes no telemetry row.
+   */
+  readonly expired?: boolean;
   /** Stop producing frames; must be idempotent. */
   stop(): void;
 }

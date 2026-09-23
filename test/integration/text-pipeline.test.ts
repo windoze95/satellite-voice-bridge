@@ -11,6 +11,7 @@ import { runCommand, type PipelineDeps } from '../../src/pipeline.js';
 import { SessionManager } from '../../src/realtime/session.js';
 import { MockHAServer } from '../mocks/mock-ha-server.js';
 import { MockRealtimeServer, type MockRealtimeOptions } from '../mocks/mock-realtime-server.js';
+import { MockResponsesServer } from '../mocks/mock-responses-server.js';
 
 const logger = new Logger({ level: 'error' });
 
@@ -49,14 +50,24 @@ class ManualScheduler {
 
 async function makeDeps(
   rtOpts: MockRealtimeOptions,
+  opts: { delegate?: string } = {},
 ): Promise<{ deps: PipelineDeps; ha: MockHAServer; rt: MockRealtimeServer; cwd: string; scheduler: ManualScheduler }> {
   const cwd = mkdtempSync(join(tmpdir(), 'vb-e2e-'));
   const ha = await MockHAServer.start();
   const rt = await MockRealtimeServer.start(rtOpts);
   const cfg = loadConfig(
-    { OPENAI_API_KEY: 'sk-test', HA_URL: ha.url, HA_TOKEN: 'test-token', VOICEBRIDGE_REALTIME_URL: rt.url },
+    {
+      OPENAI_API_KEY: 'sk-test',
+      HA_URL: ha.url,
+      HA_TOKEN: 'test-token',
+      VOICEBRIDGE_REALTIME_URL: rt.url,
+      ...(opts.delegate ? { VOICEBRIDGE_RESPONSES_URL: opts.delegate } : {}),
+    },
     cwd,
   );
+  // Delegation is opt-in per test: most of these exercise the fast path, and a
+  // stray escalation would quietly turn a refusal assertion green.
+  cfg.delegate.enabled = opts.delegate !== undefined;
   // Exercise the optional logged acknowledgement path even though the no-speaker
   // production default is false.
   cfg.session.ackResponse = true;
@@ -69,6 +80,7 @@ async function makeDeps(
     apiKey: 'sk-test',
     model: cfg.session.model,
     transcribe: false,
+    delegate: false,
     logger,
   });
   cleanups.push(async () => {
@@ -82,6 +94,24 @@ async function makeDeps(
   await haClient.start();
   return { deps: { cfg, logger, haClient, registry, sessions, flourish }, ha, rt, cwd, scheduler };
 }
+
+/** Give fixture lights real capabilities; they advertise none by default. */
+function setCapabilities(deps: PipelineDeps, capabilities: Record<string, Record<string, unknown>>): void {
+  for (const [entityId, attributes] of Object.entries(capabilities)) {
+    const state = deps.registry.cache?.statesById.get(entityId);
+    if (!state) throw new Error(`fixture is missing ${entityId}`);
+    deps.registry.cache?.statesById.set(entityId, {
+      ...state,
+      attributes: { ...state.attributes, ...attributes },
+    });
+  }
+}
+
+const KITCHEN_CAPABLE = {
+  'light.kitchen_ceiling': { supported_color_modes: ['color_temp'], min_color_temp_kelvin: 2000, max_color_temp_kelvin: 6500 },
+  'light.kitchen_island': { supported_color_modes: ['xy'] },
+  'light.kitchen_sink': { supported_color_modes: ['brightness'] },
+};
 
 describe('text pipeline (mock OpenAI + mock HA)', () => {
   it('runs the full loop: text → function call → policy → HA → verify → ack', async () => {
@@ -108,7 +138,7 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(JSON.parse(((output?.item as { output: string }).output))).toMatchObject({ ok: true });
 
     expect(rt.lastAuth).toBe('Bearer sk-test');
-    expect(rt.lastModel).toBe('gpt-realtime-2.1-mini');
+    expect(rt.lastModel).toBe('gpt-realtime-2.1');
     expect(rt.sessions[0]?.output_modalities).toEqual(['text']);
     expect(rt.sessions[0]?.max_output_tokens).toBe(1200);
     expect(rt.sessions[0]?.audio).toBeUndefined();
@@ -144,86 +174,115 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(ha.callServiceCalls).toHaveLength(0);
   });
 
-  it('retries a clear device-change no_action once with tool use required', async () => {
-    const brighter = JSON.stringify({
+  it('renders a named mood locally, giving each light a part rather than asking the model for colors', async () => {
+    const mood = JSON.stringify({
       action: 'turn_on',
       domain: 'light',
       target: 'lights',
-      area: 'kitchen',
-      light: { brightness_step_pct: 25 },
+      area: 'Kitchen',
+      light: { mood: 'intimate' },
+      tone: 'intimate',
     });
-    const { deps, ha, rt } = await makeDeps({
-      responses: [
-        { text: 'I need an exact brightness.' },
-        { functionCalls: [{ arguments: brighter }] },
-        { text: 'Done.' },
-      ],
-    });
-    for (const id of ['light.kitchen_ceiling', 'light.kitchen_island', 'light.kitchen_sink']) {
-      const state = deps.registry.cache?.statesById.get(id);
-      if (!state) throw new Error(`fixture is missing ${id}`);
-      deps.registry.cache?.statesById.set(id, {
-        ...state,
-        attributes: { ...state.attributes, supported_color_modes: ['brightness'] },
-      });
-    }
+    const { deps, ha } = await makeDeps({ responses: [{ functionCalls: [{ arguments: mood }] }, { text: 'Done.' }] });
+    setCapabilities(deps, KITCHEN_CAPABLE);
 
-    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the kitchen lights brighter' });
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'set the mood in the kitchen' });
 
     expect(rec.outcome).toBe('executed');
-    expect(ha.callServiceCalls).toHaveLength(1);
-    expect(
-      rt.received.some(
-        (message) =>
-          message.type === 'response.create' &&
-          (message.response as { tool_choice?: string; instructions?: string } | undefined)?.tool_choice === 'required' &&
-          (message.response as { instructions?: string }).instructions?.includes('Call control_device now'),
-      ),
-    ).toBe(true);
-    expect(
-      rt.received.some(
-        (message) =>
-          message.type === 'conversation.item.create' &&
-          JSON.stringify(message).includes('Call control_device now'),
-      ),
-    ).toBe(false);
+    expect(rec.tone).toBe('intimate');
+    // One model call became several service calls, each carrying real settings —
+    // no follow-up round trip, and nothing for the model to get wrong per bulb.
+    expect(ha.callServiceCalls.length).toBeGreaterThan(0);
+    for (const call of ha.callServiceCalls) {
+      expect(call.domain).toBe('light');
+      const data = call.service_data as Record<string, unknown>;
+      if (call.service === 'turn_on') {
+        expect('rgb_color' in data || 'color_temp_kelvin' in data || 'brightness_pct' in data).toBe(true);
+      }
+    }
+    const touched = new Set(rec.decisions.flatMap((decision) => decision.entityIds));
+    expect(touched.size).toBeGreaterThan(1);
   });
 
-  it('lets the model correct an invented scene into an area-light mood command', async () => {
-    const badScene = JSON.stringify({
-      action: 'activate',
-      domain: 'scene',
-      target: 'movie mode',
-      area: 'Kitchen',
-    });
+  it('records a dismissal without touching Home Assistant', async () => {
     const { deps, ha, rt } = await makeDeps({
-      responses: [
-        { functionCalls: [{ arguments: badScene }] },
-        { functionCalls: [{ arguments: ARGS_KITCHEN }] },
-        { text: 'Done.' },
-      ],
+      responses: [{ functionCalls: [{ name: 'dismiss', arguments: JSON.stringify({ reason: 'background_speech', tone: 'playful', note: 'two people talking' }) }] }],
     });
 
-    const rec = await runCommand(deps, { kind: 'text', utterance: 'activate erotica mode in the kitchen' });
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'Excited and nervous, yeah.' });
+
+    expect(rec.outcome).toBe('no_action');
+    expect(rec.ok).toBe(true);
+    expect(rec.dismissed).toEqual({ reason: 'background_speech', note: 'two people talking' });
+    expect(rec.tone).toBe('playful');
+    expect(ha.callServiceCalls).toHaveLength(0);
+    // The model still gets its tool result, so a follow-up turn sees a coherent
+    // conversation rather than a dangling call.
+    const output = rt.received.find((m) => (m.item as { type?: string } | undefined)?.type === 'function_call_output');
+    expect(output).toBeDefined();
+  });
+
+  it('hands a delegated request to the strong model and authorizes what comes back', async () => {
+    const planned = JSON.stringify({
+      action: 'turn_on',
+      domain: 'light',
+      target: 'lights',
+      area: 'Kitchen',
+      light: { brightness_pct: 40, color_temp_kelvin: 2700 },
+    });
+    const responses = await MockResponsesServer.start({
+      calls: [{ name: 'control_device', arguments: planned }],
+    });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ name: 'delegate', arguments: JSON.stringify({ request: 'something warm but readable', why: 'competing goals', tone: 'tired' }) }] }],
+    }, { delegate: responses.url });
+
+    setCapabilities(deps, KITCHEN_CAPABLE);
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'something cozy but I still need to read' });
 
     expect(rec.outcome).toBe('executed');
-    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'mood_requires_light_settings' });
-    expect(rec.decisions[1]).toMatchObject({ outcome: 'execute' });
+    expect(rec.delegated?.model).toBeDefined();
+    expect(rec.delegated?.why).toBe('competing goals');
+    expect(rec.d.delegate).toBeGreaterThanOrEqual(0);
     expect(ha.callServiceCalls).toHaveLength(1);
-    expect(
-      rt.received.some(
-        (message) =>
-          message.type === 'response.create' &&
-          (message.response as { instructions?: string; tools?: Array<{ parameters?: { properties?: Record<string, unknown> } }> } | undefined)?.instructions?.includes(
-            'Correct the previous rejected call',
-          ) &&
-          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["light"]') &&
-          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["Kitchen"]') &&
-          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes(
-            '"required":["action","domain","target","area","light"]',
-          ),
-      ),
-    ).toBe(true);
+    // Delegation buys a better plan, not wider authority.
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'execute', tier: 'green' });
+    await responses.close();
+  });
+
+  it('escalates a near-miss refusal to the strong model instead of re-asking the fast one', async () => {
+    const vague = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'the thing over there', area: 'Kitchen' });
+    const planned = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'Kitchen Island', area: 'Kitchen' });
+    const responses = await MockResponsesServer.start({ calls: [{ name: 'control_device', arguments: planned }] });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: vague }] }],
+    }, { delegate: responses.url });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'turn on the thing over there' });
+
+    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'no_confident_match' });
+    expect(rec.outcome).toBe('executed');
+    expect(rec.delegated).toBeDefined();
+    expect(ha.callServiceCalls).toHaveLength(1);
+    await responses.close();
+  });
+
+  it('refuses rather than escalating when the refusal was a decision, not a near miss', async () => {
+    const responses = await MockResponsesServer.start({ calls: [] });
+    const { deps, ha } = await makeDeps({
+      responses: [{ functionCalls: [{ arguments: ARGS_ALARM }] }],
+    }, { delegate: responses.url });
+
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'disarm the alarm' });
+
+    expect(rec.outcome).toBe('refused');
+    expect(rec.decisions[0]).toMatchObject({ reason: 'red_tier' });
+    // A red-tier refusal must never be shopped to a second model.
+    expect(rec.delegated).toBeUndefined();
+    expect(responses.requests).toHaveLength(0);
+    expect(ha.callServiceCalls).toHaveLength(0);
+    await responses.close();
   });
 
   it('preserves an explicitly named advertised scene even when the phrase also contains a mood word', async () => {
@@ -273,16 +332,29 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     'Shut up!',
     'Hey!',
     '', // transcription ran and heard nothing intelligible
-  ])('refuses a model call for an utterance that is not a command: %j', async (transcript) => {
+  ])('takes no action when the model dismisses ordinary speech: %j', async (transcript) => {
     const { deps, ha } = await makeDeps({
-      responses: [{ functionCalls: [{ arguments: ARGS_KITCHEN }] }, { text: 'ok' }],
+      responses: [{ functionCalls: [{ name: 'dismiss', arguments: JSON.stringify({ reason: 'background_speech', tone: 'neutral' }) }] }],
     });
 
     const rec = await runCommand(deps, { kind: 'text', utterance: transcript });
 
-    expect(rec.outcome).toBe('refused');
-    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'not_a_command' });
+    expect(rec.outcome).toBe('no_action');
+    expect(rec.dismissed?.reason).toBe('background_speech');
     expect(ha.callServiceCalls).toHaveLength(0);
+  });
+
+  it('acts on a command whose verb no vocabulary list would have contained', async () => {
+    const toggle = JSON.stringify({ action: 'toggle', domain: 'light', target: 'lights', area: 'Kitchen', tone: 'playful' });
+    const { deps, ha } = await makeDeps({ responses: [{ functionCalls: [{ arguments: toggle }] }, { text: 'Done.' }] });
+
+    // "hit" was never in CHANGE_WORDS, and under the old gate that silence was
+    // indistinguishable from a non-command.
+    const rec = await runCommand(deps, { kind: 'text', utterance: 'hit the lights' });
+
+    expect(rec.outcome).toBe('executed');
+    expect(rec.tone).toBe('playful');
+    expect(ha.callServiceCalls).toHaveLength(1);
   });
 
   it.each([
@@ -361,6 +433,7 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
         rgb_color: null,
         color_temp_kelvin: 2700,
         effect: null,
+        mood: null,
         transition_seconds: 3,
         flash: null,
       },
@@ -401,59 +474,7 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     });
   });
 
-  it('bounces an appearance request whose turn_on carries no light settings into a forced correction', async () => {
-    const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
-    const corrected = JSON.stringify({
-      action: 'turn_on',
-      domain: 'light',
-      target: 'lights',
-      area: 'Living Room',
-      light: { brightness_pct: 70, color_temp_kelvin: 4000 },
-    });
-    const { deps, ha, rt } = await makeDeps({
-      responses: [
-        { functionCalls: [{ arguments: bare }] },
-        { functionCalls: [{ arguments: corrected }] },
-        { text: 'Done.' },
-      ],
-    });
-    for (const id of ['light.living_room_ceiling', 'light.living_room_floor_lamp']) {
-      const state = deps.registry.cache?.statesById.get(id);
-      if (!state) throw new Error(`fixture is missing ${id}`);
-      deps.registry.cache?.statesById.set(id, {
-        ...state,
-        attributes: {
-          ...state.attributes,
-          supported_color_modes: ['color_temp'],
-          min_color_temp_kelvin: 2000,
-          max_color_temp_kelvin: 6500,
-        },
-      });
-    }
-
-    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the living room lights normal' });
-
-    expect(rec.outcome).toBe('executed');
-    expect(rec.decisions[0]).toMatchObject({ outcome: 'refuse', reason: 'appearance_requires_light_settings' });
-    expect(rec.decisions[1]).toMatchObject({ outcome: 'execute', service: 'turn_on' });
-    expect(rec.decisions[1]?.serviceData).toEqual({ brightness_pct: 70, color_temp_kelvin: 4000 });
-    expect(ha.callServiceCalls).toHaveLength(1);
-    expect(ha.callServiceCalls[0]).toMatchObject({
-      domain: 'light',
-      service: 'turn_on',
-      service_data: { brightness_pct: 70, color_temp_kelvin: 4000 },
-    });
-    expect(
-      rt.received.some(
-        (message) =>
-          message.type === 'response.create' &&
-          (message.response as { instructions?: string } | undefined)?.instructions?.includes('Correct the previous rejected call') &&
-          JSON.stringify((message.response as { tools?: unknown[] }).tools).includes('"enum":["Living Room"]'),
-      ),
-    ).toBe(true);
-  });
-
-  it('executes a plain bare turn_on without any appearance correction', async () => {
+  it('executes a plain bare turn_on in one round trip', async () => {
     const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
     const { deps, ha, rt } = await makeDeps({
       responses: [{ functionCalls: [{ arguments: bare }] }, { text: 'Done.' }],
@@ -464,38 +485,9 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
     expect(rec.outcome).toBe('executed');
     expect(rec.decisions).toHaveLength(1);
     expect(ha.callServiceCalls).toHaveLength(1);
-    expect(JSON.stringify(rt.received)).not.toContain('Correct the previous rejected call');
-  });
-
-  it('suppresses the appearance correction when another call in the response already executed', async () => {
-    const good = JSON.stringify({
-      action: 'turn_on',
-      domain: 'light',
-      target: 'lights',
-      area: 'Living Room',
-      light: { brightness_pct: 80 },
-    });
-    const bare = JSON.stringify({ action: 'turn_on', domain: 'light', target: 'lights', area: 'Living Room', light: null });
-    const { deps, ha, rt } = await makeDeps({
-      responses: [{ functionCalls: [{ arguments: good }, { arguments: bare }] }, { text: 'Done.' }],
-    });
-    for (const id of ['light.living_room_ceiling', 'light.living_room_floor_lamp']) {
-      const state = deps.registry.cache?.statesById.get(id);
-      if (!state) throw new Error(`fixture is missing ${id}`);
-      deps.registry.cache?.statesById.set(id, {
-        ...state,
-        attributes: { ...state.attributes, supported_color_modes: ['brightness'] },
-      });
-    }
-
-    const rec = await runCommand(deps, { kind: 'text', utterance: 'make the living room lights bright and colorful' });
-
-    expect(rec.outcome).toBe('executed');
-    expect(rec.decisions).toHaveLength(2);
-    expect(rec.decisions[0]).toMatchObject({ outcome: 'execute' });
-    expect(rec.decisions[1]).toMatchObject({ outcome: 'refuse', reason: 'appearance_requires_light_settings' });
-    expect(ha.callServiceCalls).toHaveLength(1);
-    expect(JSON.stringify(rt.received)).not.toContain('Correct the previous rejected call');
+    // Exactly one response.create beyond the acknowledgement: no retry, no
+    // correction, nothing for a simple command to pay for.
+    expect(rt.received.filter((message) => message.type === 'response.create')).toHaveLength(2);
   });
 
   it('executes multiple function calls in one response sequentially', async () => {
@@ -568,10 +560,40 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
         rgb_color: null,
         color_temp_kelvin: null,
         effect: 'prism',
+        mood: null,
         transition_seconds: null,
         flash: null,
       },
       rotation: null,
+    };
+
+    /** The live easter egg: a colour walk around the room, not a bulb effect. */
+    const RAINBOW_ROTATION = {
+      phrases: ['super gay', 'super gay and horny'],
+      durationMs: 5_000,
+      light: {
+        brightness_pct: 100,
+        brightness_step_pct: null,
+        rgb_color: [255, 0, 0] as [number, number, number],
+        color_temp_kelvin: null,
+        effect: null,
+        mood: null,
+        transition_seconds: null,
+        flash: null,
+      },
+      rotation: {
+        colors: [
+          [255, 0, 0],
+          [255, 120, 0],
+          [255, 240, 0],
+          [0, 255, 60],
+          [0, 140, 255],
+          [190, 0, 255],
+        ] as Array<[number, number, number]>,
+        intervalMs: 450,
+        transitionSeconds: 0,
+        brightnessPct: 100,
+      },
     };
 
     /** Give the kitchen lights Hue-like effect support and a known current look. */
@@ -722,6 +744,69 @@ describe('text pipeline (mock OpenAI + mock HA)', () => {
       expect(rec.outcome).toBe('refused');
       expect(rec.decisions[0]).toMatchObject({ reason: 'no_area_for_flourish' });
       expect(ha.callServiceCalls).toHaveLength(0);
+    });
+
+    it.each([
+      'super gay and horny',
+      'hey can you make it super gay and horny in here please',
+      'kitchen lights super gay and horny now',
+      'SUPER GAY AND HORNY!',
+    ])('fires the rainbow easter egg wherever the phrase sits in the utterance: %j', async (utterance) => {
+      const { deps, ha } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [RAINBOW_ROTATION];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance, originArea: 'Kitchen' });
+
+      // Never reaches the model: no session is opened, so no tool choice, no
+      // dismissal, and nothing to refuse or reinterpret.
+      expect(rec.outcome).toBe('executed');
+      expect(rec.function_calls).toHaveLength(0);
+      expect(ha.callServiceCalls[0]).toMatchObject({
+        domain: 'light',
+        service: 'turn_on',
+        service_data: { rgb_color: [255, 0, 0], brightness_pct: 100 },
+      });
+      // And it holds a restore, so the room goes back to exactly what it was.
+      expect(deps.flourish.pendingCount).toBeGreaterThan(0);
+      deps.flourish.stop();
+    });
+
+    it('still fires the easter egg when the model tries to dismiss the utterance', async () => {
+      const { deps, ha } = await makeDeps({
+        responses: [
+          { functionCalls: [{ name: 'dismiss', arguments: JSON.stringify({ reason: 'not_about_the_house', tone: 'playful' }) }] },
+        ],
+        transcript: 'make it super gay and horny',
+      });
+      deps.cfg.flourishes = [RAINBOW_ROTATION];
+      makeKitchenEffectCapable(deps);
+
+      // A spoken one goes through the session for transcription, and the
+      // transcript match has to beat whatever the model decided.
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'make it super gay and horny', originArea: 'Kitchen' });
+
+      expect(rec.outcome).toBe('executed');
+      expect(rec.dismissed).toBeUndefined();
+      expect(ha.callServiceCalls).toHaveLength(1);
+      deps.flourish.stop();
+    });
+
+    it('prefers the longest matching easter-egg phrase', async () => {
+      const { deps, ha } = await makeDeps({ responses: [] });
+      deps.cfg.flourishes = [
+        { ...RAINBOW, phrases: ['super gay'] },
+        RAINBOW_ROTATION,
+      ];
+      makeKitchenEffectCapable(deps);
+
+      const rec = await runCommand(deps, { kind: 'text', utterance: 'make it super gay and horny', originArea: 'Kitchen' });
+
+      expect(rec.outcome).toBe('executed');
+      // "super gay and horny" beats the shorter "super gay", so the rotation
+      // runs rather than the plain held effect.
+      expect(ha.callServiceCalls[0]?.service_data).toMatchObject({ rgb_color: [255, 0, 0] });
+      deps.flourish.stop();
     });
 
     it('leaves ordinary commands on the model path', async () => {
