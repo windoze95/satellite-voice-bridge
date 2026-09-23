@@ -102,8 +102,13 @@ export class HAClient extends EventEmitter {
 
   stop(): void {
     this.stateInternal = 'stopped';
+    // Cleared AND dropped: the reconnect timer is referenced while retrying, so
+    // a stale handle left here would be the one thing keeping a finished CLI
+    // command from exiting.
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     if (this.stableTimer) clearTimeout(this.stableTimer);
+    this.stableTimer = null;
     this.stopPing();
     this.failPending(new HAUnavailableError('client stopped'));
     this.ws?.removeAllListeners();
@@ -301,8 +306,14 @@ export class HAClient extends EventEmitter {
     this.emit('down', err);
     if (this.opts.retry) {
       const delay = backoffDelay(this.attempt++, this.opts.backoffBaseMs ?? 1000, this.opts.backoffCapMs ?? 60_000);
+      // Deliberately NOT unref'd. While retrying, this timer is the service's
+      // only lifeline: `voicebridge run` awaits start(), which never resolves
+      // while Home Assistant is unreachable, and no satellite has connected
+      // yet. An unref'd timer let Node find nothing referenced and exit 0 —
+      // a clean exit that reads as success, so launchd respawned every 10 s
+      // instead of the service simply waiting for HA to come back.
+      // stop() clears this, so shutdown is unaffected.
       this.reconnectTimer = setTimeout(() => this.connect(), delay);
-      this.reconnectTimer.unref?.();
     }
   }
 

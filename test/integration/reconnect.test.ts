@@ -27,7 +27,58 @@ describe('backoffDelay', () => {
   });
 });
 
+/** Reach the private reconnect timer without widening the production surface. */
+function reconnectTimer(client: HAClient): NodeJS.Timeout | null {
+  return (client as unknown as { reconnectTimer: NodeJS.Timeout | null }).reconnectTimer;
+}
+
 describe('HA reconnect (service mode)', () => {
+  it('keeps the process alive while waiting for Home Assistant to come back', async () => {
+    // Regression: the reconnect timer used to be unref'd. `voicebridge run`
+    // awaits start(), which never resolves while HA is unreachable, and no
+    // satellite has connected yet — so an unref'd timer left nothing
+    // referencing the event loop and Node exited 0. launchd read that clean
+    // exit as a finished job and respawned every 10 s instead of the service
+    // simply waiting out the outage.
+    const client = new HAClient({
+      url: 'ws://127.0.0.1:1/api/websocket', // nothing listens here
+      token: 'test-token',
+      logger,
+      retry: true,
+      backoffBaseMs: 10_000,
+      backoffCapMs: 10_000,
+    });
+    cleanups.push(() => client.stop());
+
+    const started = client.start();
+    // With retry, start() stays pending through a failure rather than rejecting.
+    const settled = await Promise.race([started.then(() => 'settled').catch(() => 'settled'), sleep(300).then(() => 'pending')]);
+    expect(settled).toBe('pending');
+
+    const timer = reconnectTimer(client);
+    expect(timer).not.toBeNull();
+    expect(timer?.hasRef()).toBe(true);
+  });
+
+  it('stops retrying once the client is stopped', async () => {
+    const client = new HAClient({
+      url: 'ws://127.0.0.1:1/api/websocket',
+      token: 'test-token',
+      logger,
+      retry: true,
+      backoffBaseMs: 10_000,
+      backoffCapMs: 10_000,
+    });
+    void client.start().catch(() => undefined);
+    await sleep(200);
+    expect(reconnectTimer(client)?.hasRef()).toBe(true);
+
+    // A referenced timer must not outlive shutdown, or the CLI would hang.
+    client.stop();
+    expect(client.state).toBe('stopped');
+    expect(reconnectTimer(client)).toBeNull();
+  });
+
   it('reconnects after a drop and re-syncs the registry', async () => {
     const server = await MockHAServer.start();
     const registry = new Registry(logger, { voiceDomains: ['light'] });

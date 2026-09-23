@@ -12,7 +12,8 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ssh "$TARGET" "mkdir -p $REMOTE_DIR"
 rsync -a --delete \
   --exclude .env \
-  --exclude voicebridge.yaml \
+  --exclude 'voicebridge.yaml*' \
+  --exclude 'firmware/.build/' \
   --exclude var/ \
   --exclude node_modules/ \
   --exclude dist/ \
