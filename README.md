@@ -36,6 +36,8 @@ bridge never has to infer "was that a command?" from a vocabulary list.
 - ✅ Local mood composer: the model names a mood, the bridge decides which bulb
   does what.
 - ✅ Follow-up window: keep talking for a few seconds with no second wake word.
+- ✅ Satellite reconnect: a device reboot or Wi-Fi blip re-claims the audio
+  subscription instead of leaving the bridge connected but deaf.
 
 ## Quickstart
 
@@ -174,8 +176,25 @@ command so the next utterance needs no wake word:
 (silence)                              → mic closes
 ```
 
-The mechanism is ESPHome's: the Satellite stops streaming when it receives
-`STT_VAD_END`, so the bridge simply withholds that event until the chain ends.
+The mechanism is the Satellite's own state machine, and it is unforgiving enough
+to be worth stating precisely (`voice_assistant.cpp`, transcribed into
+`src/audio/satellite-manager.ts` and modelled in
+`test/mocks/fake-satellite-firmware.ts`):
+
+- `STT_VAD_END` moves it to `STOP_MICROPHONE` → `AWAITING_RESPONSE`. With no
+  speaker there is no TTS event to move it on again.
+- `RUN_END` acts only from `STREAMING_MICROPHONE` (stop the mic, go idle) or
+  `AWAITING_RESPONSE` (go idle). From `STOP_MICROPHONE`/`STOPPING_MICROPHONE` it
+  matches nothing at all.
+- `STT_VAD_START`, `STT_END`, `INTENT_START`, `INTENT_END` are triggers only —
+  safe to send mid-chain, which is what lets the device show progress per turn.
+
+So a chain withholds `STT_VAD_END` (that is the event that would close the mic)
+and ends on `RUN_END` while the device is still streaming. Because a fast command
+can put `STT_VAD_END` and `RUN_END` in the same breath — where `RUN_END` would do
+nothing and strand the device mid-"thinking" — every run also sends a second
+`RUN_END` 300 ms later. It is free when the first worked.
+
 The chain shares one Realtime conversation, which is what lets "dim it a bit"
 resolve against what just happened; that history is pruned once the chain ends so
 it cannot colour the next person who says the wake word. A follow-up the model
